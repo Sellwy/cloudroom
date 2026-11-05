@@ -137,6 +137,8 @@ function formatCheckedAt(now: () => number): string {
 export function shouldEnableDesktopAutoUpdate(
   args: ShouldEnableDesktopAutoUpdateArgs,
 ): boolean {
+  // Fork: self-built copies set BB_DESKTOP_AUTO_UPDATE=0 so they never swap themselves for the official app.
+  if (args.env.BB_DESKTOP_AUTO_UPDATE === "0") return false;
   return args.isPackaged || args.env.BB_DESKTOP_AUTO_UPDATE === "1";
 }
 
