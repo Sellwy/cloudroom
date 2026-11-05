@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { SelfHostedCoreForm } from "./settings/SelfHostedCoreForm";
 import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
 import { atomWithStorage } from "jotai/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -404,6 +405,10 @@ function AccountStep({ email, signingIn, next, fresh }: { email: string | null; 
           <div className="mt-8 flex flex-col items-start gap-4">
             <Cta onClick={() => start()}>Sign in with browser <Icon name="ArrowRight" aria-hidden /></Cta>
             <Note>Already signed in there? You come right back.</Note>
+          </div>
+          {/* Fork: the own-Core form lives in Settings, which this locked screen hides, so offer it here too. */}
+          <div className="mt-8 max-w-[420px] text-sm">
+            <SelfHostedCoreForm connected={false} ready={false} error={null} />
           </div>
         </>
       )}

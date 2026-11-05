@@ -9,7 +9,7 @@ pub(super) const HERMES: cursor::Flavor = cursor::Flavor {
     harness: "hermes",
     name: "Hermes",
     native_path: |home, _| home.join(DATABASE),
-    valid_id: cursor::valid_id,
+    valid_id,
     capture: false,
     notices: &[],
     // Hermes replays the whole conversation on `session/load`; Cloudroom already has it.
@@ -18,6 +18,14 @@ pub(super) const HERMES: cursor::Flavor = cursor::Flavor {
     empty_turn: None,
 };
 const DATABASE: &str = "state.db";
+
+/// Hermes 0.22+ names ACP sessions `local-` plus 64 lowercase hex digits; older ones used UUIDs.
+fn valid_id(id: &str) -> bool {
+    cursor::valid_id(id)
+        || id.strip_prefix("local-").is_some_and(|hex| {
+            hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+}
 /// The efforts Local threads offer for Hermes (provider-acp).
 pub const REASONING_LEVELS: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
 
@@ -91,7 +99,7 @@ pub(super) fn validate(
     saved: &Resume,
     identity: super::files::Identity,
 ) -> io::Result<()> {
-    if !cursor::valid_id(&saved.id) || saved.path != profile.home.join(DATABASE) {
+    if !valid_id(&saved.id) || saved.path != profile.home.join(DATABASE) {
         return Err(io::Error::other(
             "Hermes native path does not match its session",
         ));
