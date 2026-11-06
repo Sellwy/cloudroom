@@ -55,7 +55,7 @@ pub(super) fn command(config: &Config, profile: &HarnessConfig) -> io::Result<Co
 }
 
 pub(super) async fn start(handle: &Handle) -> io::Result<String> {
-    cursor::initialize(handle, "DeepSeek Harness").await?;
+    cursor::initialize_resumable(handle, "DeepSeek Harness").await?;
     let mut params = json!({"cwd":handle.repository,"mcpServers":[]});
     let method = if let Some(saved) = &handle.resume {
         params["sessionId"] = json!(saved.id);
