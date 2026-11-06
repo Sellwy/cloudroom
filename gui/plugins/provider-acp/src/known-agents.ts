@@ -343,6 +343,23 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
       env: {},
     },
   },
+  // Fork addition (Sellwy/cloudroom): DeepSeek Harness. Its own profile picks the provider and model,
+  // e.g. OpenRouter through `~/.dsh/settings.yaml` and `~/.dsh/profiles/acp/cordis.patch.yml`.
+  {
+    id: "acp-deepseek",
+    displayName: "DeepSeek Harness",
+    icon: declaredIcon("deepseek-harness"),
+    installUrl: "https://github.com/deepseek-ai/deepseek-harness",
+    installer: { npmPackage: "@deepseek-ai/dsh" },
+    visibility: "installed",
+    fork: "none",
+    launch: {
+      displayName: "DeepSeek Harness",
+      command: "dsh",
+      args: ["--profile", "acp"],
+      env: { DSH_TELEMETRY_DISABLED: "1" },
+    },
+  },
   {
     id: "acp-cline",
     displayName: "Cline",
