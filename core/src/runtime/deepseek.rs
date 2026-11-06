@@ -64,19 +64,29 @@ pub(super) async fn start(handle: &Handle) -> io::Result<String> {
         "session/new"
     };
     let (id, session) = cursor::attach(handle, "DeepSeek Harness", method, params).await?;
+    // dsh has no `session/set_model`; it switches models through its `model` config option, whose values
+    // are JSON pairs like `["openrouter","z-ai/glm-5.3-flash"]`. `acp-default` is the app's "agent default".
     let requested = handle.profile.model.as_str();
-    if requested != "default" && session["models"]["currentModelId"] != requested {
-        handle
-            .call(
-                "session/set_model",
-                json!({"sessionId":id,"modelId":requested}),
-            )
-            .await
-            .map_err(|error| {
-                invalid(format!(
-                    "DeepSeek Harness model {requested} is unavailable in Cloud: {error}"
-                ))
-            })?;
+    if !matches!(requested, "default" | "acp-default") {
+        let model = model_option(&session);
+        if model["currentValue"] != requested {
+            if !option_values(&model).any(|value| value == requested) {
+                return Err(invalid(format!(
+                    "DeepSeek Harness model {requested} is unavailable in Cloud"
+                )));
+            }
+            handle
+                .call(
+                    "session/set_config_option",
+                    json!({"sessionId":id,"configId":model["id"],"value":requested}),
+                )
+                .await
+                .map_err(|error| {
+                    invalid(format!(
+                        "DeepSeek Harness model {requested} is unavailable in Cloud: {error}"
+                    ))
+                })?;
+        }
     }
     if let Some(reasoning) = handle.reasoning.as_deref() {
         // Only send efforts dsh advertises for this session; others keep the model's default.
@@ -97,6 +107,33 @@ pub(super) async fn start(handle: &Handle) -> io::Result<String> {
     Ok(id)
 }
 
+/// The session's model selector (`category: "model"`, else `id: "model"`), or null.
+fn model_option(session: &serde_json::Value) -> serde_json::Value {
+    let options = session["configOptions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    options
+        .iter()
+        .find(|option| option["category"] == "model")
+        .or_else(|| options.iter().find(|option| option["id"] == "model"))
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Every selectable value of a select option, including ones nested in ACP option groups.
+fn option_values(option: &serde_json::Value) -> impl Iterator<Item = &str> {
+    option["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|entry| match entry["options"].as_array() {
+            Some(group) => group.iter().collect::<Vec<_>>(),
+            None => vec![entry],
+        })
+        .filter_map(|entry| entry["value"].as_str())
+}
+
 pub(super) fn validate(
     profile: &HarnessConfig,
     saved: &Resume,
@@ -114,4 +151,27 @@ pub(super) fn validate(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_grouped_model_values() {
+        let session = json!({"configOptions":[{"id":"model","category":"model","type":"select",
+            "currentValue":"[\"openrouter\",\"z-ai/glm-5.3-flash\"]",
+            "options":[{"group":"openrouter","name":"openrouter","options":[
+                {"value":"[\"openrouter\",\"z-ai/glm-5.3-flash\"]","name":"GLM 5.3 Flash"},
+                {"value":"[\"openrouter\",\"z-ai/glm-5.3\"]","name":"GLM 5.3"}]}]}]});
+        let model = model_option(&session);
+        assert_eq!(model["id"], "model");
+        assert_eq!(
+            option_values(&model).collect::<Vec<_>>(),
+            [
+                "[\"openrouter\",\"z-ai/glm-5.3-flash\"]",
+                "[\"openrouter\",\"z-ai/glm-5.3\"]"
+            ]
+        );
+    }
 }
