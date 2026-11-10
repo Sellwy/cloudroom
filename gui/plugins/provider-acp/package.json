@@ -28,8 +28,7 @@
         "devin": "./icons/devin.svg",
         "droid": "./icons/droid.svg",
         "kilo": "./icons/kilo.svg",
-        "cline": "./icons/cline.svg",
-        "deepseek-harness": "./icons/acp.svg"
+        "cline": "./icons/cline.svg"
       }
     },
     "server": "./server.ts",

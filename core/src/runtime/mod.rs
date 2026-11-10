@@ -22,7 +22,6 @@ pub(crate) mod cursor;
 pub(crate) mod cursor_auth;
 pub(crate) mod cursor_models;
 pub mod cursor_print;
-mod deepseek;
 mod devin;
 mod droid;
 mod files;
@@ -53,8 +52,6 @@ pub enum Kind {
     #[serde(rename = "opencode")]
     OpenCode,
     Hermes,
-    #[serde(rename = "deepseek")]
-    DeepSeek,
     Devin,
     Droid,
     #[serde(rename = "openclaw")]
@@ -120,7 +117,6 @@ pub const PI_REASONING_LEVELS: &[&str] = &["none", "minimal", "low", "medium", "
 pub fn pi_reasoning_accepted(level: &str) -> bool {
     level == "max" || PI_REASONING_LEVELS.contains(&level)
 }
-pub use deepseek::REASONING_LEVELS as DEEPSEEK_REASONING_LEVELS;
 pub use devin::REASONING_LEVELS as DEVIN_REASONING_LEVELS;
 pub use droid::REASONING_LEVELS as DROID_REASONING_LEVELS;
 pub use hermes::REASONING_LEVELS as HERMES_REASONING_LEVELS;
@@ -565,16 +561,6 @@ impl Handle {
                 None,
                 None,
             ),
-            Kind::DeepSeek => (
-                deepseek::command(config, &profile)?,
-                Box::new(cursor::Protocol::new(
-                    &profile,
-                    resume.as_ref(),
-                    deepseek::DEEPSEEK,
-                )),
-                None,
-                None,
-            ),
             Kind::Devin => (
                 devin::command(config, &profile)?,
                 Box::new(cursor::Protocol::new(
@@ -707,7 +693,6 @@ impl Handle {
                 | Kind::Fx
                 | Kind::OpenCode
                 | Kind::Hermes
-                | Kind::DeepSeek
                 | Kind::Devin
                 | Kind::Droid
                 | Kind::OpenClaw
@@ -729,7 +714,6 @@ impl Handle {
             Kind::Fx => fx::start(&startup).await,
             Kind::OpenCode => opencode::start(&startup).await,
             Kind::Hermes => hermes::start(&startup).await,
-            Kind::DeepSeek => deepseek::start(&startup).await,
             Kind::Devin => devin::start(&startup).await,
             Kind::Droid => droid::start(&startup).await,
             Kind::OpenClaw => openclaw::start(&startup).await,
@@ -774,7 +758,6 @@ impl Handle {
             Kind::Cursor
             | Kind::OpenCode
             | Kind::Hermes
-            | Kind::DeepSeek
             | Kind::Devin
             | Kind::Droid
             | Kind::OpenClaw => cursor::send(self, request, input)
@@ -798,7 +781,6 @@ impl Handle {
             Kind::Cursor
             | Kind::OpenCode
             | Kind::Hermes
-            | Kind::DeepSeek
             | Kind::Devin
             | Kind::Droid
             | Kind::OpenClaw => cursor::steer(self, request, text).await,
@@ -814,7 +796,6 @@ impl Handle {
             | Kind::Fx
             | Kind::OpenCode
             | Kind::Hermes
-            | Kind::DeepSeek
             | Kind::Devin
             | Kind::Droid
             | Kind::OpenClaw => Err(io::Error::new(
@@ -844,7 +825,6 @@ impl Handle {
             | Kind::Fx
             | Kind::OpenCode
             | Kind::Hermes
-            | Kind::DeepSeek
             | Kind::Devin
             | Kind::Droid
             | Kind::OpenClaw => Err(io::Error::new(
@@ -933,7 +913,6 @@ impl Handle {
             | Kind::Fx
             | Kind::OpenCode
             | Kind::Hermes
-            | Kind::DeepSeek
             | Kind::Devin
             | Kind::Droid
             | Kind::OpenClaw => Ok(None),
@@ -955,7 +934,6 @@ impl Handle {
             | Kind::Fx
             | Kind::OpenCode
             | Kind::Hermes
-            | Kind::DeepSeek
             | Kind::Devin
             | Kind::Droid
             | Kind::OpenClaw => cursor::interrupt(self, state).await,
@@ -970,7 +948,6 @@ impl Handle {
             | Kind::Fx
             | Kind::OpenCode
             | Kind::Hermes
-            | Kind::DeepSeek
             | Kind::Devin
             | Kind::Droid
             | Kind::OpenClaw => Err(io::Error::new(
@@ -1016,7 +993,6 @@ pub fn check_resume_history(
         Kind::Fx => return fx::validate(profile, saved, identity),
         Kind::OpenCode => return opencode::validate(profile, saved, identity),
         Kind::Hermes => return hermes::validate(profile, saved, identity),
-        Kind::DeepSeek => return deepseek::validate(profile, saved, identity),
         Kind::Devin => return devin::validate(profile, saved, identity),
         Kind::Droid => return droid::validate(profile, saved, identity),
         Kind::OpenClaw => return openclaw::validate(profile, saved, identity),
@@ -1059,9 +1035,6 @@ pub fn recover_records(
         // Hermes, Devin, and OpenClaw keep their sessions in their own databases; Cloudroom stores the ACP stream only.
         Kind::Hermes => {
             hermes::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid)))
-        }
-        Kind::DeepSeek => {
-            deepseek::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid)))
         }
         Kind::Devin => devin::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid))),
         Kind::Droid => droid::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid))),
@@ -1131,13 +1104,9 @@ pub fn checkpoint(
         Kind::Codex | Kind::Claude => files::checkpoint(previous, data, native),
         Kind::Pi => pi::checkpoint(data, native),
         Kind::Cursor => cursor::checkpoint(previous, data, native),
-        Kind::Fx
-        | Kind::OpenCode
-        | Kind::Hermes
-        | Kind::DeepSeek
-        | Kind::Devin
-        | Kind::Droid
-        | Kind::OpenClaw => Err(io::Error::other("ACP stream has no native records")),
+        Kind::Fx | Kind::OpenCode | Kind::Hermes | Kind::Devin | Kind::Droid | Kind::OpenClaw => {
+            Err(io::Error::other("ACP stream has no native records"))
+        }
     }
 }
 

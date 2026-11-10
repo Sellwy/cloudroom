@@ -23,10 +23,7 @@ const DATABASE: &str = "state.db";
 fn valid_id(id: &str) -> bool {
     cursor::valid_id(id)
         || id.strip_prefix("local-").is_some_and(|hex| {
-            hex.len() == 64
-                && hex
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         })
 }
 /// The efforts Local threads offer for Hermes (provider-acp).

@@ -165,7 +165,6 @@ impl Manager {
                 | runtime::Kind::Fx
                 | runtime::Kind::OpenCode
                 | runtime::Kind::Hermes
-                | runtime::Kind::DeepSeek
                 | runtime::Kind::Devin
                 | runtime::Kind::Droid
                 | runtime::Kind::OpenClaw => {
@@ -176,7 +175,6 @@ impl Manager {
                     harness["reasoning_levels"] = json!(match kind {
                         runtime::Kind::OpenCode => runtime::OPENCODE_REASONING_LEVELS,
                         runtime::Kind::Hermes => runtime::HERMES_REASONING_LEVELS,
-                        runtime::Kind::DeepSeek => runtime::DEEPSEEK_REASONING_LEVELS,
                         runtime::Kind::Devin => runtime::DEVIN_REASONING_LEVELS,
                         runtime::Kind::Droid => runtime::DROID_REASONING_LEVELS,
                         runtime::Kind::OpenClaw => runtime::OPENCLAW_REASONING_LEVELS,
@@ -238,7 +236,6 @@ impl Manager {
                 runtime::Kind::Cursor
                     | runtime::Kind::OpenCode
                     | runtime::Kind::Hermes
-                    | runtime::Kind::DeepSeek
                     | runtime::Kind::Devin
                     | runtime::Kind::Droid
                     | runtime::Kind::OpenClaw
@@ -262,7 +259,6 @@ impl Manager {
             runtime::Kind::Pi | runtime::Kind::Fx => runtime::pi_reasoning_accepted(reasoning),
             runtime::Kind::OpenCode => runtime::OPENCODE_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::Hermes => runtime::HERMES_REASONING_LEVELS.contains(&reasoning),
-            runtime::Kind::DeepSeek => runtime::DEEPSEEK_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::Devin => runtime::DEVIN_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::Droid => runtime::DROID_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::OpenClaw => runtime::OPENCLAW_REASONING_LEVELS.contains(&reasoning),

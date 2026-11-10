@@ -83,7 +83,6 @@ impl Config {
             "fx" => Kind::Fx,
             "opencode" => Kind::OpenCode,
             "hermes" => Kind::Hermes,
-            "deepseek" => Kind::DeepSeek,
             "devin" => Kind::Devin,
             "droid" => Kind::Droid,
             "openclaw" => Kind::OpenClaw,
@@ -154,7 +153,6 @@ impl Config {
             (Kind::Fx, "fx", ".fx"),
             (Kind::OpenCode, "opencode", ".local/share/opencode"),
             (Kind::Hermes, "hermes", ".hermes"),
-            (Kind::DeepSeek, "dsh", ".dsh"),
             (Kind::Devin, "devin", ".local/share/devin"),
             (Kind::Droid, "droid", ".factory"),
         ] {

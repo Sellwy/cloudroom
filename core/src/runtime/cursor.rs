@@ -100,27 +100,6 @@ pub(super) async fn open(handle: &Handle, name: &str) -> io::Result<(String, Val
 
 /// Returns the agent's capabilities and keeps them on the handle.
 pub(super) async fn initialize(handle: &Handle, name: &str) -> io::Result<Value> {
-    initialize_checked(handle, name, |capabilities| {
-        capabilities["loadSession"] == true
-    })
-    .await
-}
-
-/// Like [`initialize`] for agents that reopen sessions through `session/resume` instead of
-/// `session/load` (DeepSeek Harness advertises `sessionCapabilities.resume`).
-pub(super) async fn initialize_resumable(handle: &Handle, name: &str) -> io::Result<Value> {
-    initialize_checked(handle, name, |capabilities| {
-        capabilities["loadSession"] == true
-            || capabilities["sessionCapabilities"]["resume"].is_object()
-    })
-    .await
-}
-
-async fn initialize_checked(
-    handle: &Handle,
-    name: &str,
-    can_reopen: fn(&Value) -> bool,
-) -> io::Result<Value> {
     let init = handle
         .call(
             "initialize",
@@ -129,7 +108,7 @@ async fn initialize_checked(
         "clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false}}),
         )
         .await?;
-    if init["protocolVersion"] != 1 || !can_reopen(&init["agentCapabilities"]) {
+    if init["protocolVersion"] != 1 || init["agentCapabilities"]["loadSession"] != true {
         return Err(io::Error::other(format!(
             "{name} ACP session loading is unavailable"
         )));

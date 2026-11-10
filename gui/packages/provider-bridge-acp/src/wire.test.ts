@@ -151,43 +151,6 @@ describe("acpSessionNewResultSchema", () => {
     expect(parsed.data.configOptions?.[1].category).toBeUndefined();
     expect(parsed.data.configOptions?.[1].options?.[0].name).toBeUndefined();
   });
-
-  it("flattens grouped model options (DeepSeek Harness)", () => {
-    const parsed = acpSessionNewResultSchema.safeParse({
-      sessionId: "session-1",
-      configOptions: [
-        {
-          id: "model",
-          name: "Model",
-          category: "model",
-          type: "select",
-          currentValue: '["openrouter","z-ai/glm-5.3-flash"]',
-          options: [
-            {
-              group: "openrouter",
-              name: "openrouter",
-              options: [
-                {
-                  value: '["openrouter","z-ai/glm-5.3-flash"]',
-                  name: "Z.ai: GLM 5.3 Flash",
-                },
-                { value: '["openrouter","z-ai/glm-5.3"]', name: "Z.ai: GLM 5.3" },
-              ],
-            },
-          ],
-        },
-      ],
-    });
-
-    expect(parsed.success).toBe(true);
-    if (!parsed.success) {
-      return;
-    }
-    expect(parsed.data.configOptions?.[0].options?.map((o) => o.value)).toEqual([
-      '["openrouter","z-ai/glm-5.3-flash"]',
-      '["openrouter","z-ai/glm-5.3"]',
-    ]);
-  });
 });
 
 describe("acpSessionForkResultSchema", () => {

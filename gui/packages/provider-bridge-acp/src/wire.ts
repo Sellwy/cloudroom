@@ -297,28 +297,6 @@ const acpLooseConfigOptionSchema = z
   })
   .passthrough();
 
-/**
- * ACP select options may be grouped (`{ group, name, options: [...] }`), as DeepSeek Harness
- * groups its models by provider. Lift grouped entries to one flat list.
- */
-function flattenAcpOptionGroups(option: unknown): unknown {
-  if (typeof option !== "object" || option === null) {
-    return option;
-  }
-  const entries = (option as { options?: unknown }).options;
-  if (!Array.isArray(entries)) {
-    return option;
-  }
-  const flat = entries.flatMap((entry: unknown) => {
-    const nested =
-      typeof entry === "object" && entry !== null
-        ? (entry as { options?: unknown }).options
-        : undefined;
-    return Array.isArray(nested) ? nested : [entry];
-  });
-  return { ...option, options: flat };
-}
-
 function parseAcpConfigOptions(
   options: unknown[] | null | undefined,
   ctx: z.RefinementCtx,
@@ -335,9 +313,7 @@ function parseAcpConfigOptions(
     const isModelOption =
       loose.data.category === "model" || loose.data.id === "model";
     if (isModelOption) {
-      const strict = acpConfigOptionSchema.safeParse(
-        flattenAcpOptionGroups(option),
-      );
+      const strict = acpConfigOptionSchema.safeParse(option);
       if (strict.success) {
         parsedOptions.push(strict.data);
         continue;
