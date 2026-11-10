@@ -20,21 +20,22 @@ Plugin state lives under `<bb-data-dir>/plugins/<id>/` (per-plugin SQLite file,
 secrets, logs).
 
 The builtin Custom instructions plugin adds a multiline editor under Settings
-→ Custom instructions. Saved text is appended to each new Local and Cloud message,
-not the session's startup instructions. Blank text or disabling the plugin stops
-future additions; existing conversation history stays unchanged. Cloud messages
-capture the setting when submitted, so queued messages and retries keep that copy.
-Control commands such as `/compact` stay unchanged; the next message includes the
-instructions again. After upgrading, resume Local sessions after an idle app restart
-to clear the old startup copy.
+→ Custom instructions. Saved text is appended to a Local or Cloud message, not the
+session's startup instructions, and only when the thread needs it: on its first
+message, after the text changes, after its context is compacted or cleared, and
+every 20 messages. Blank text or disabling the plugin stops future additions and
+tells the thread once that the earlier text no longer applies; existing
+conversation history stays unchanged. Cloud messages capture the setting when
+submitted, so queued messages and retries keep that copy. Control commands such
+as `/compact` stay unchanged. A thread whose copy may be lost (a cancelled or failed message, a new agent session) gets it again.
 
 The builtin Accounts plugin is always on. It lets one user connect up to 10
 Claude Code and up to 10 Codex subscriptions. Add them at the top of Settings →
 Agents → Claude Code or Codex; the machine's own CLI login is the first entry
 and is never copied. Every Local and Cloud thread uses the account in use, and
-**Use** picks another; nothing switches automatically. Once a Claude account is
-added, the machine's own login needs **Add Terminal login** before it can be
-picked. Codex accounts need a Cloudroom sign-in: cloudroom.dev keeps and renews
+**Use** picks another; nothing switches automatically. Adding an account never
+switches. Once Cloud is on another Claude account, picking the machine's own login
+first asks for one browser approval for Cloud. Codex accounts need a Cloudroom sign-in: cloudroom.dev keeps and renews
 them, and this machine gets only access tokens.
 Claude Code runs on the account's own Claude folder (`CLAUDE_CONFIG_DIR`), with a full
 login and shared history, and Cloud gets its one-year token; Codex signs its

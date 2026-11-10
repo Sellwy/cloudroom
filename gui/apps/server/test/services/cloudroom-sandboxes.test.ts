@@ -140,7 +140,7 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     harness.deps.db.insert(cloudroomCommands).values({ id: "edit-queued", threadId: thread.id, command: "edit", input: JSON.stringify({ target_request_id: "over-limit", expected_revision: 1, text: "Not now, edited" }), createdAt: Date.now() + 1 }).run();
     // A delivery is preparing to wake the sandbox for the message, copying logins first, when Stop lands. Every login is
     // skipped, so no real one is read.
-    const allLogins = new Set(["codex", "pi", "opencode", "hermes", "devin", "openclaw", "cursor", "github"]);
+    const allLogins = new Set(["codex", "pi", "opencode", "hermes", "devin", "kimi", "openclaw", "cursor", "github"]);
     let releaseLogins: (() => void) | null = null;
     service.sandboxes.skipLogins = () => releaseLogins ? Promise.resolve(allLogins) : new Promise(resolve => { releaseLogins = () => resolve(allLogins); });
     await setCopyLogins(harness.deps, true);
@@ -849,4 +849,17 @@ it("Windows MCP paths and %VARIABLES% stay on this PC", async () => {
     expect(WINDOWS_LOCAL_PATH.test(local), local).toBe(true);
   for (const portable of ["npx", "-y", "@acme/mcp", "https://mcp.example.com/mcp", "50%"])
     expect(WINDOWS_LOCAL_PATH.test(portable), portable).toBe(false);
+});
+
+it("Mac-only MCP programs like xcrun stay on this Mac (#1244)", async () => {
+  const { macMcpServers } = await import("../../src/services/cloudroom/sandboxes.js");
+  const dir = await mkdtemp(join(tmpdir(), "mac-mcp-"));
+  const stdio = (command: string, args: string[] = []) => ({ type: "stdio", command, args, env: {} });
+  const servers = { xcode: stdio("xcrun", ["mcpbridge"]), build: stdio("xcodebuild"), apple: stdio("osascript", ["-e", "x"]), npx: stdio("npx", ["-y", "@acme/mcp"]), xcrunner: stdio("xcrunner"), remote: { type: "http", url: "https://mcp.example.com/mcp" } };
+  await writeFile(join(dir, ".claude.json"), JSON.stringify({ mcpServers: servers }));
+  vi.stubEnv("CLAUDE_CONFIG_DIR", dir);
+  try {
+    const found = Object.fromEntries((await macMcpServers()).filter(({ name }) => name in servers).map(({ name, server }) => [name, !server]));
+    expect(found).toEqual({ xcode: true, build: true, apple: true, npx: false, xcrunner: false, remote: false });
+  } finally { vi.unstubAllEnvs(); await rm(dir, { recursive: true, force: true }); }
 });

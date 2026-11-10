@@ -14,9 +14,20 @@ const AGENT_DIR: &str = "/run/cloudroom/agent";
 /// Sourced by every non-interactive bash a harness starts (BASH_ENV; Claude Code's command shells skip it and source
 /// CLAUDE_ENV_FILE instead), so each command an agent runs, and all it starts, is what the kernel kills first when
 /// memory runs out, never the agent or Core. A harness launched through a bash wrapper (its parent is Core) keeps 0.
+/// It runs after login startup files, so a Mac environment they set (#1034, #1033) can't hide tools or logins: the
+/// system tool folders go back on PATH, last, so the user's own folders still win. HOME, XDG_CONFIG_HOME and
+/// GH_CONFIG_DIR change only when they name a missing Mac folder. Plain sh, since CLAUDE_ENV_FILE may meet zsh.
 const BASH_ENV: &str = r#"{ read -r _cloudroom_parent < /proc/$PPID/comm; } 2>/dev/null
 [ "$_cloudroom_parent" = cloudroom ] || { echo 500 > /proc/$$/oom_score_adj; } 2>/dev/null
-unset _cloudroom_parent
+for _cloudroom_dir in /usr/local/bin /usr/bin /bin; do
+  case ":${PATH-}:" in *":$_cloudroom_dir:"*) ;; *) PATH="${PATH:+$PATH:}$_cloudroom_dir" ;; esac
+done
+case "${HOME-}" in /Users/*|/Volumes/*)
+  if [ ! -e "$HOME" ] && _cloudroom_dir=$(getent passwd "$(id -u)" | cut -d: -f6) && [ -d "$_cloudroom_dir" ]; then HOME=$_cloudroom_dir; fi ;;
+esac
+case "${XDG_CONFIG_HOME-}" in /Users/*|/Volumes/*) [ -e "$XDG_CONFIG_HOME" ] || unset XDG_CONFIG_HOME ;; esac
+case "${GH_CONFIG_DIR-}" in /Users/*|/Volumes/*) [ -e "$GH_CONFIG_DIR" ] || unset GH_CONFIG_DIR ;; esac
+unset _cloudroom_parent _cloudroom_dir
 "#;
 /// A container's `os.cpus()` lists every host CPU, and tools such as Next.js start a worker per CPU.
 const NODE_CPUS: &str = r#"const os = require('node:os'), cpus = os.cpus, usable = os.availableParallelism?.();
@@ -222,10 +233,10 @@ impl Workload {
     /// harness or its helpers. The youngest group wins ties. None when nothing but the harness remains.
     pub fn top_writer(&self, harness: u32) -> io::Result<Option<Writer>> {
         let pids = self.pids()?;
-        let own_group = stat(harness as i32).map(|(group, _)| group);
+        let own_group = stat(harness as i32).map(|(_, group, _)| group);
         let mut groups: std::collections::HashMap<i32, Vec<(i32, u64, u64)>> = Default::default();
         for pid in pids {
-            if let Some((group, started)) = stat(pid)
+            if let Some((_, group, started)) = stat(pid)
                 && pid != harness as i32
                 && Some(group) != own_group
                 && !helper(pid)
@@ -377,7 +388,7 @@ fn program(pid: i32, name: &[u8]) -> bool {
     })
 }
 /// Computer use marks the virtual screen, its helpers and the apps it launches with `CLOUDROOM_DESKTOP=1`; the
-/// shared browser is matched by `browser`, and Chromium's crash reporter is never real work. For idle sleep only:
+/// shared browser is matched by `browser`, and Chromium's crash reporter is never real work. For idle sleep and burn:
 /// the disk guard still sees them. An unreadable environment counts as a background job, as before.
 fn desktop(pid: i32) -> bool {
     let marked = fs::read(format!("/proc/{pid}/environ")).is_ok_and(|environ| {
@@ -433,6 +444,127 @@ pub(crate) fn pause_browser(paused: bool, owner: Option<u32>) {
         }
     }
 }
+/// Where a process comes from, for idle burn (docs/scopes/credit-burn.md). Only the agent account's processes are
+/// jobs or strays.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Origin {
+    /// Core, and what runs in the process group of one of its direct children: harnesses and their helpers, sync,
+    /// terminal shells.
+    Core(i32),
+    /// A command a harness or terminal started in a group of its own, or anything in a live workload: builds, tests,
+    /// downloads, servers. Never stopped.
+    Job,
+    /// Nothing tracks it: orphaned, outside every workload, and started after Core, as are all its descendants.
+    Stray,
+    /// Other accounts, the virtual screen and shared browser, Codex's host, and anything uncertain.
+    Other,
+}
+
+/// Sorts processes by origin, each once. Make a new one for each reading: pids are reused.
+pub(crate) struct Origins {
+    agent: u32,
+    core: u32,
+    started: u64,
+    /// Core's own cgroup, which holds every workload. None where workloads are marked instead.
+    cgroup: Option<PathBuf>,
+    known: std::collections::HashMap<u32, Origin>,
+}
+
+impl Origins {
+    pub fn new(policy: &Policy) -> Self {
+        let core = std::process::id();
+        Self {
+            agent: policy.agent_uid,
+            core,
+            started: stat(core as i32).map_or(u64::MAX, |(_, _, start)| start),
+            // Unreadable means everything is in it, so nothing is a stray.
+            cgroup: (policy.cgroup_root.is_some())
+                .then(|| cgroup(core).unwrap_or_else(|| PathBuf::from("/"))),
+            known: Default::default(),
+        }
+    }
+
+    /// The origin of the process that started at `start` (ticks after boot); `Other` once that process is gone.
+    pub fn of(&mut self, pid: u32, start: u64) -> Origin {
+        match stat(pid as i32) {
+            Some((_, _, now)) if now == start => self.find(pid),
+            _ => Origin::Other,
+        }
+    }
+
+    fn find(&mut self, pid: u32) -> Origin {
+        if let Some(origin) = self.known.get(&pid) {
+            return *origin;
+        }
+        // A pid reused mid-walk can't loop.
+        self.known.insert(pid, Origin::Other);
+        let origin = self.sort(pid).unwrap_or(Origin::Other);
+        self.known.insert(pid, origin);
+        origin
+    }
+
+    fn sort(&mut self, pid: u32) -> Option<Origin> {
+        let (parent, group, start) = stat(pid as i32)?;
+        if pid == self.core {
+            return Some(Origin::Core(group));
+        }
+        let id = pid as i32;
+        if pid <= 1 || uid(id)? != self.agent || desktop(id) || helper(id) {
+            return Some(Origin::Other);
+        }
+        if parent == self.core {
+            return Some(Origin::Core(group));
+        }
+        Some(match (self.find(parent), self.workload(pid)) {
+            (Origin::Core(own), _) if own == group => Origin::Core(own),
+            (Origin::Core(_) | Origin::Job, _) | (_, Some(true)) => Origin::Job,
+            // Chromium's helpers overwrite their environment, so they follow their parent.
+            (Origin::Stray, _) => Origin::Stray,
+            (_, Some(false)) if parent == 1 && start > self.started => Origin::Stray,
+            _ => Origin::Other,
+        })
+    }
+
+    /// Whether a process runs in Core's cgroup or carries a workload marker. None when unreadable.
+    fn workload(&self, pid: u32) -> Option<bool> {
+        match &self.cgroup {
+            Some(own) => Some(cgroup(pid)?.starts_with(own)),
+            None => {
+                let environ = fs::read(format!("/proc/{pid}/environ")).ok()?;
+                Some(
+                    environ
+                        .split(|b| *b == 0)
+                        .any(|var| var.starts_with(MARKER)),
+                )
+            }
+        }
+    }
+}
+
+/// A process's cgroup v2 path, from `/proc/PID/cgroup`.
+fn cgroup(pid: u32) -> Option<PathBuf> {
+    let groups = fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    groups
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .map(PathBuf::from)
+}
+
+/// Stops strays: asks each to quit (SIGTERM), then kills what is left 5 s later (SIGKILL). Only the same processes:
+/// a pid whose start time changed belongs to another one now.
+pub(crate) async fn stop(strays: Vec<(u32, u64)>) {
+    let signal = |number| {
+        for (pid, start) in &strays {
+            if stat(*pid as i32).is_some_and(|(_, _, now)| now == *start) {
+                send(*pid as i32, number);
+            }
+        }
+    };
+    signal(15);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    signal(SIGKILL);
+}
+
 /// A process's real uid, from `/proc/PID/status`. Readable even when the process isn't dumpable, unlike the
 /// owner of `/proc/PID`, which is then root.
 fn uid(pid: i32) -> Option<u32> {
@@ -445,11 +577,15 @@ fn uid(pid: i32) -> Option<u32> {
             .ok()
     })
 }
-/// A process's group and start time, from `/proc/PID/stat`.
-fn stat(pid: i32) -> Option<(i32, u64)> {
+/// A process's parent, group and start time, from `/proc/PID/stat`.
+fn stat(pid: i32) -> Option<(u32, i32, u64)> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let fields: Vec<&str> = stat.rsplit_once(") ")?.1.split_whitespace().collect();
-    Some((fields.get(2)?.parse().ok()?, fields.get(19)?.parse().ok()?))
+    Some((
+        fields.get(1)?.parse().ok()?,
+        fields.get(2)?.parse().ok()?,
+        fields.get(19)?.parse().ok()?,
+    ))
 }
 /// Bytes a process sent to disk. Zero when unreadable: another account's counters need ptrace rights.
 fn written(pid: i32) -> u64 {
@@ -563,6 +699,96 @@ pub(super) async fn reply<T>(
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_startup_files_never_hide_the_system_tools_or_home() {
+        let home = std::env::temp_dir().join(format!("bash-env-test-{}", std::process::id()));
+        fs::create_dir_all(&home).unwrap();
+        fs::write(home.join("hook.sh"), BASH_ENV).unwrap();
+        let account = std::process::Command::new("sh")
+            .args(["-c", "getent passwd \"$(id -u)\" | cut -d: -f6"])
+            .output()
+            .unwrap();
+        let account = String::from_utf8_lossy(&account.stdout).trim().to_owned();
+        for (startup, expected) in [
+            (
+                "PATH=/opt/homebrew/bin:/usr/bin HOME=/Users/a GH_CONFIG_DIR=/Users/a/gh",
+                format!("/opt/homebrew/bin:/usr/bin:/usr/local/bin:/bin|{account}|-"),
+            ),
+            (
+                "PATH=/a/bin:/usr/local/bin:/usr/bin:/bin GH_CONFIG_DIR=/tmp/no-gh",
+                format!(
+                    "/a/bin:/usr/local/bin:/usr/bin:/bin|{}|/tmp/no-gh",
+                    home.display()
+                ),
+            ),
+            (
+                "set -eu; unset HOME PATH",
+                "/usr/local/bin:/usr/bin:/bin||-".into(),
+            ),
+        ] {
+            fs::write(home.join(".bash_profile"), format!("{startup}\n")).unwrap();
+            let output = std::process::Command::new("/bin/bash")
+                .args(["-lc", "printf %s \"${PATH-}|${HOME-}|${GH_CONFIG_DIR--}\""])
+                .env_clear()
+                .env("HOME", &home)
+                .env("BASH_ENV", home.join("hook.sh"))
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+        }
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn idle_burn_never_calls_a_tracked_job_a_stray() {
+        // Marked workloads, as in a container. Both orphans' shells exit; only the job keeps its marker.
+        let uid = uid(std::process::id() as i32).unwrap();
+        let policy: Policy = serde_json::from_value(serde_json::json!({"agent_uid": uid,
+            "agent_gid": uid, "cache_dir": "/tmp", "cgroup_root": null, "agent_sudo": true}))
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(20)); // Start times count 10 ms ticks.
+        let orphan = |marked: bool| {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "sleep 30 > /dev/null 2>&1 & echo $!"]);
+            command.env_clear().env("PATH", "/usr/bin:/bin");
+            if marked {
+                command.env("CLOUDROOM_WORKLOAD", "idle-test");
+            }
+            let output = command.output().unwrap();
+            let pid: u32 = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .parse()
+                .unwrap();
+            (pid, stat(pid as i32).unwrap())
+        };
+        let (job, (_, _, job_start)) = orphan(true);
+        let (stray, (parent, _, stray_start)) = orphan(false);
+        let mut harness = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let harness_start = stat(harness.id() as i32).unwrap().2;
+        let mut origins = Origins::new(&policy);
+        assert_eq!(origins.of(job, job_start), Origin::Job);
+        assert!(matches!(
+            origins.of(harness.id(), harness_start),
+            Origin::Core(_)
+        ));
+        // A reaper other than init in between (some CI containers) leaves it uncertain.
+        let expected = if parent == 1 {
+            Origin::Stray
+        } else {
+            Origin::Other
+        };
+        assert_eq!(origins.of(stray, stray_start), expected);
+        assert_eq!(origins.of(stray, stray_start + 1), Origin::Other);
+        for pid in [job, stray] {
+            send(pid as i32, SIGKILL);
+        }
+        let _ = harness.kill();
+        let _ = harness.wait();
+    }
 
     #[test]
     fn a_full_disk_stops_the_writing_tool_command_not_the_harness() {

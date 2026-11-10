@@ -1,7 +1,10 @@
 use super::Receipt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fs, path::Path, sync::Mutex};
+
+/// Claiming, putting back and adding a note take turns, so a note added mid-claim is never lost.
+static NOTICE: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PromptState {
@@ -83,6 +86,53 @@ pub fn apply(prompts: &mut BTreeMap<String, PromptState>, receipt: &Receipt) {
             }
         }
         _ => {}
+    }
+}
+
+/// The website leaves `notice` in the state folder when it restores a thread onto a fresh machine
+/// (web/lib/sandboxes.ts). The next prompt the agent gets carries it, once: deleting the file claims it, so two
+/// sessions never both add it. A prompt starting with a slash command stays as it is; the note waits for the next one.
+/// Returns the note it took, so a send that fails can put it back (`put_back_notice`).
+pub fn with_notice(state_dir: &Path, mut input: Value) -> (Value, Option<String>) {
+    if !input.is_object() || text(&input).trim_start().starts_with('/') {
+        return (input, None);
+    }
+    let _turn = NOTICE.lock().unwrap();
+    let path = state_dir.join("notice");
+    let Ok(note) = fs::read_to_string(&path) else {
+        return (input, None);
+    };
+    if fs::remove_file(&path).is_err() || note.trim().is_empty() {
+        return (input, None);
+    }
+    let note = note.trim().to_owned();
+    if let Some(parts) = input.get_mut("content").and_then(Value::as_array_mut)
+        && !parts.is_empty()
+    {
+        parts.push(serde_json::json!({"type":"text","text":format!("\n{note}")}));
+    }
+    input["text"] = Value::String(format!("{}\n\n{note}", text(&input)));
+    (input, Some(note))
+}
+
+/// A note whose prompt never reached the agent waits for the next one, after any note written since.
+pub fn put_back_notice(state_dir: &Path, note: &str) {
+    add_notice(state_dir, note);
+}
+
+/// Core's own notes (idle burn) join any note still waiting, once each, so the next prompt carries them all.
+pub fn add_notice(state_dir: &Path, note: &str) {
+    let _turn = NOTICE.lock().unwrap();
+    let path = state_dir.join("notice");
+    let waiting = fs::read_to_string(&path).unwrap_or_default();
+    // Bounded: a note that repeats while no prompt comes is added once.
+    if waiting.contains(note.trim()) || waiting.len() > 16 * 1024 {
+        return;
+    }
+    let temporary = state_dir.join(".notice");
+    let text = format!("{}\n{note}", waiting.trim_end());
+    if fs::write(&temporary, text.trim_start()).is_ok() {
+        let _ = fs::rename(temporary, path);
     }
 }
 

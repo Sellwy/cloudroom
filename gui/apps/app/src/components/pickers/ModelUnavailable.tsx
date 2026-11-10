@@ -1,5 +1,5 @@
 import { useEffect, useState, type ComponentType } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import type {
   SystemExecutionOptionsModelLoadError,
   SystemProvidersQuery,
@@ -7,6 +7,17 @@ import type {
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { useAppCommandRunner } from "@/components/commands/AppCommandProvider";
+import {
+  buildProviderCliIssue,
+  hasProviderCliAction,
+  useProviderCliInstallRunner,
+} from "@/components/provider-cli/provider-cli-install";
+import { providerCliJobKey } from "@/components/provider-cli/provider-cli-install-store";
+import { useEnvironment } from "@/hooks/queries/environment-queries";
+import {
+  useHostProviderCliStatus,
+  useSystemConfig,
+} from "@/hooks/queries/system-queries";
 import { systemExecutionOptionsQueryKey } from "@/hooks/queries/query-keys";
 import {
   modelCatalogCacheKey,
@@ -25,6 +36,69 @@ function shortReason(error: SystemExecutionOptionsModelLoadError | null) {
 }
 
 const signInsInProgress = new Set<string>();
+
+/** The install Cloudroom can run for a provider whose CLI is missing or broken on the routed machine. */
+function useProviderCliFix(
+  providerId: string,
+  routing: SystemProvidersQuery | undefined,
+  enabled: boolean,
+) {
+  const environment = useEnvironment(routing?.environmentId, { enabled });
+  const config = useSystemConfig({ enabled });
+  const hostId =
+    routing?.hostId ??
+    (routing?.environmentId
+      ? (environment.data?.hostId ?? null)
+      : (config.data?.primaryHostId ?? null));
+  const cliStatus = useHostProviderCliStatus({ hostId, enabled });
+  const status = cliStatus.data?.[providerId];
+  const issue =
+    enabled && status && !status.installed
+      ? buildProviderCliIssue({ provider: providerId, status })
+      : null;
+  const { runningJobKey, queuedJobKeys, startInstall } =
+    useProviderCliInstallRunner();
+  if (hostId === null || issue === null || !hasProviderCliAction(issue)) {
+    return null;
+  }
+  const jobKey = providerCliJobKey(hostId, providerId);
+  return {
+    // A CLI found on disk that can't run is broken, not missing.
+    broken: issue.status.executablePath !== null,
+    installing: runningJobKey === jobKey || queuedJobKeys.has(jobKey),
+    install: () => startInstall({ hostId, issue }),
+  };
+}
+
+/** Reloads a provider's models on its route, e.g. after a sign-in, and updates the picker's cache. */
+export async function restartProviderModels(
+  queryClient: QueryClient,
+  providerId: string,
+  routing?: SystemProvidersQuery,
+) {
+  const identity = {
+    providerId,
+    environmentId: routing?.environmentId ?? null,
+    hostId: routing?.hostId ?? null,
+  };
+  const queryKey = systemExecutionOptionsQueryKey(identity);
+  await queryClient.cancelQueries({ queryKey, exact: true });
+  const result = await sdk.providers.restartModelDiscovery({
+    providerId,
+    ...(routing?.environmentId
+      ? { environmentId: routing.environmentId }
+      : routing?.hostId
+        ? { hostId: routing.hostId }
+        : {}),
+  });
+  queryClient.setQueryData(queryKey, result);
+  if (!result.modelLoadError && result.models.length > 0)
+    writeCachedModelCatalog(modelCatalogCacheKey(identity), {
+      models: result.models,
+      selectedOnlyModels: result.selectedOnlyModels,
+    });
+  return result;
+}
 
 export function ModelUnavailable({
   providerId,
@@ -59,7 +133,15 @@ export function ModelUnavailable({
   const needsSignIn =
     signInCommand !== undefined &&
     (error ? error.code === "auth_required" : !failed);
-  const helpUrl = error?.code === "missing_executable" ? installUrl : undefined;
+  const cliFix = useProviderCliFix(
+    providerId,
+    routing,
+    error?.code === "missing_executable",
+  );
+  const helpUrl =
+    error?.code === "missing_executable" && cliFix === null
+      ? installUrl
+      : undefined;
   const handleHelpLinkClick = useUrlAnchorClickHandler(helpUrl);
   const retry = useMutation({
     mutationFn: async (restart: boolean) => {
@@ -68,16 +150,7 @@ export function ModelUnavailable({
         await queryClient.refetchQueries({ queryKey, exact: true });
         return;
       }
-      await queryClient.cancelQueries({ queryKey, exact: true });
-      const result = await sdk.providers.restartModelDiscovery({
-        providerId,
-        ...(routing?.environmentId
-          ? { environmentId: routing.environmentId }
-          : routing?.hostId
-            ? { hostId: routing.hostId }
-            : {}),
-      });
-      queryClient.setQueryData(queryKey, result);
+      const result = await restartProviderModels(queryClient, providerId, routing);
       if (result.modelLoadError) {
         throw new Error(
           formatModelLoadErrorText({
@@ -89,10 +162,6 @@ export function ModelUnavailable({
       if (result.models.length === 0) {
         throw new Error(`${providerLabel} still returned no models.`);
       }
-      writeCachedModelCatalog(modelCatalogCacheKey(identity), {
-        models: result.models,
-        selectedOnlyModels: result.selectedOnlyModels,
-      });
       signInsInProgress.delete(signInKey);
     },
   });
@@ -114,7 +183,11 @@ export function ModelUnavailable({
     setTerminalFailed(!opened);
   };
 
-  const label = failed || error ? shortReason(error) : "No models";
+  const label = cliFix?.broken
+    ? `${providerLabel} install is broken`
+    : failed || error
+      ? shortReason(error)
+      : "No models";
   const detail = retry.isError
     ? retry.error.message
     : needsSignIn
@@ -162,6 +235,20 @@ export function ModelUnavailable({
                 )}
             </span>
           ) : null}
+        </>
+      ) : cliFix ? (
+        <>
+          <span className="text-center text-foreground">{label}</span>
+          <Button size="sm" disabled={cliFix.installing} onClick={cliFix.install}>
+            <Icon
+              name={cliFix.installing ? "Spinner" : "Download"}
+              className={cliFix.installing ? "size-3.5 animate-spin" : "size-3.5"}
+              aria-hidden
+            />
+            {cliFix.installing
+              ? `Installing ${providerLabel}…`
+              : `${cliFix.broken ? "Reinstall" : "Install"} ${providerLabel}`}
+          </Button>
         </>
       ) : helpUrl ? (
         <a

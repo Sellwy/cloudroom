@@ -11,6 +11,7 @@ import os
 import plistlib
 import socket
 import socketserver
+import subprocess
 import shutil
 import sys
 import tarfile
@@ -282,13 +283,14 @@ class MacJobTests(unittest.TestCase):
                                        fetch=lambda url, body, *_: results.append(body) if body['state'] == 'done' else None,
                                        config={'connectionFile': str(folder / 'cloudroom.json')},
                                        connection={'account': {'id': '11111111-1111-4111-8111-111111111111'}, 'sandboxToken': 'a' * 64})
-            jobs = preview.MacJobs(folder)
+            jobs, downloads = preview.MacJobs(folder), []
             def run(name, on):
-                jobs.execute(on, 'mac', {'id': name, 'command': f'touch {folder}/{name}'})
+                jobs.execute(on, 'mac', {'id': name, 'command': f'touch {folder}/{name}', 'stdin_bytes': 5})
                 return results[-1]['code'], bytes.fromhex(results[-1]['stderr']).decode()
             run_sandbox, next_wake, vm = core('run'), core('next wake'), core('vm', sandbox=False)
             unconfirmed = "The Mac could not confirm this sandbox's API keys with Cloudroom, so the command did not run. Try again."
-            with mock.patch.object(preview, 'control', control), mock.patch.object(preview, 'review', lambda *_: None):
+            with mock.patch.object(preview, 'control', control), mock.patch.object(preview, 'review', lambda *_: None), \
+                    mock.patch.object(preview, 'mac_stdin', lambda core, device, job: downloads.append(job['id']) or ''):
                 # Failed, from an older website, without a sandbox row, or garbled: each refuses and asks again next time.
                 answers[:] = [preview.ControlError(503), {'secrets': None}, {'secrets': None, 'found': False}, {'secrets': '.env', 'found': True}]
                 for name in ('failed', 'old', 'missing', 'garbled'):
@@ -311,6 +313,69 @@ class MacJobTests(unittest.TestCase):
             self.assertEqual([body for _, body in asked], [{'action': 'secrets', 'thread': 'thr_run'}] * 6)
             self.assertTrue(all(url == 'https://www.cloudroom.dev/api/desktop/sandboxes' for url, _ in asked))
             self.assertEqual(sorted(path.name for path in folder.iterdir() if path.suffix != '.json'), ['allowed', 'vm'])
+            # A sandbox refused for its key list never makes the Mac download a job's input.
+            self.assertEqual(downloads, ['allowed', 'vm'])
+
+    def test_a_fake_core_gets_no_more_kept_than_core_sends(self):
+        # Security fix: a sandbox's agent has root, so it can answer the helper in place of Core, with jobs, input, and
+        # stops of any size. The helper keeps no more than a real Core sends.
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            preview.save(folder / 'config.json', {'macAccess': 'off'})
+            jobs, opened, results, started, held = preview.MacJobs(folder), [], [], [], threading.Event()
+            core = SimpleNamespace(url='http://core', headers={}, key='core', sandbox=False, connection={},
+                                   config={'connectionFile': str(folder / 'cloudroom.json')},
+                                   fetch=lambda url, body, *_: results.append(body))
+            # The longest job a real Core sends (up to 0.1.75, with its input inside), a short one, two stops, and a line
+            # longer than any job.
+            longest = {'id': 'longest', 'command': '\x01' * 65536, 'cwd': '\x01' * 4096, 'stdin': '00' * preview.MAC_LIMIT}
+            events = [('job', longest), ('job', {'id': 'short'}), ('cancel', {'id': 'other'}), ('cancel', {'id': 'short'})]
+            stream = ''.join(f'event: {name}\ndata: {json.dumps(data)}\n\n' for name, data in events)
+            stream = (stream + 'data: ' + 'x' * preview.MAC_LINE + '\n').encode()
+            def open(request, timeout):
+                opened.append(request.full_url)
+                if len(opened) == 1:
+                    return io.BytesIO(stream)
+                jobs.wanted = set()
+                raise OSError('Stream closed')
+            def execute(core, device, job):
+                started.append(job['id'])
+                held.wait(10)
+            with mock.patch.dict(preview.NET, opener=SimpleNamespace(open=open)):
+                # Input over Core's own 16 MiB, or a size no Core sends, is refused without a download. So is any input
+                # once Mac access is Off.
+                for size in (preview.MAC_LIMIT + 1, -2, '5', 1.5, True):
+                    self.assertIsNone(preview.mac_stdin(core, 'mac', {'id': 'x', 'stdin_bytes': size}))
+                self.assertIsNone(preview.mac_stdin(core, 'mac', {'id': 'x', 'stdin': '00' * (preview.MAC_LIMIT + 1)}))
+                jobs.execute(core, 'mac', {'id': 'off', 'command': 'true', 'stdin_bytes': 5})
+                self.assertEqual((opened, bytes.fromhex(results[-1]['stderr']).decode()), ([], 'Mac access is off.'))
+                with mock.patch.object(jobs, 'execute', execute):
+                    jobs.wanted = {'core'}
+                    follow = threading.Thread(target=jobs.follow, args=(core, 'mac'))
+                    follow.start()
+                    while follow.is_alive():
+                        with preview.NUDGE:  # Skips the wait before reconnecting.
+                            preview.NUDGE.notify_all()
+                        follow.join(.05)
+                    for _ in range(200):
+                        if len(started) == 2:
+                            break
+                        time.sleep(.01)
+                    # The longest real job is taken, a stop is kept only for a job taken, and the long line ends the stream.
+                    self.assertEqual((sorted(started), jobs.taken, jobs.cancelled, len(opened)),
+                                     (['longest', 'short'], {'longest': 1, 'short': 1}, {'short'}, 2))
+                    held.set()
+                    for _ in range(200):
+                        if not jobs.taken:
+                            break
+                        time.sleep(.01)
+                    self.assertEqual((jobs.taken, jobs.cancelled), ({}, set()))
+            # The review list keeps a fixed-size key, never the command. Its report goes to a closed local port.
+            reviewed = SimpleNamespace(url='http://core', config={}, thread=None,
+                                       connection={'account': {'id': 'a'}, 'sandboxToken': 't', 'websiteUrl': 'http://127.0.0.1:9'})
+            with mock.patch.dict(preview.REVIEWS, sent={}), mock.patch.object(preview, 'control', lambda *_: None):
+                preview.review(reviewed, {'command': 'x' * 65536}, 'full', False)
+                self.assertEqual([len(key) for key in preview.REVIEWS['sent']], [32])
 
     @unittest.skipIf(os.name == 'nt', 'Read-only needs the macOS sandbox')
     def test_read_only_hides_every_cloudroom_folder_with_keys(self):
@@ -327,7 +392,7 @@ class MacJobTests(unittest.TestCase):
                 plistlib.dumps({'EnvironmentVariables': {'BB_DATA_DIR': str(home / 'old-machine')}}))
             (agents / 'app.getbb.host-daemon.broken.plist').write_text('<?xml version="1.0"?><plist><dict>')
             with mock.patch.dict(os.environ, {'HOME': str(home)}):
-                args = preview.read_only(data)
+                args = preview.read_only(data, 'helper.read-only', 'helper.read-only.job')
         params = dict(args[n + 1].split('=', 1) for n, arg in enumerate(args) if arg == '-D')
         group = lambda name: {Path(path) for key, path in params.items() if key.startswith(name)}
         self.assertEqual(group('FOLDER_'), {data, home / '.gui-cloudroom', home / '.gui-cloudroom-dev'})
@@ -340,6 +405,110 @@ class MacJobTests(unittest.TestCase):
                                                     '(deny file-read* file-write* (subpath (param "MACHINE_0"))')]
         self.assertEqual(order, sorted(order))
         self.assertTrue(profile.endswith(f' {preview.READ_ONLY_OLD_KEYS})'))
+        # The marks that let the helper end everything the command starts (end).
+        self.assertIn('(deny mach-lookup (global-name "helper.read-only") (global-name "helper.read-only.job"))', profile)
+
+    @unittest.skipIf(os.name == 'nt', 'Mac access runs on macOS and Linux')
+    def test_read_only_command_leaves_nothing_running(self):
+        # Security fix: a process a Read-only command started kept running after the command, its thread and sandbox, and
+        # Mac access Off. Now nothing a read-only command starts outlives it, its stop, its sandbox's stream, or its helper,
+        # even after setsid and a double fork, or as a chain of processes that each fork and end at once. Full commands keep
+        # theirs (dev servers), and other sandboxes and other helpers' commands run on. Linux has no macOS sandbox, so
+        # there the marks travel in an environment variable.
+        mac, started = sys.platform == 'darwin', []
+        with tempfile.TemporaryDirectory(dir='/tmp') as folder, tempfile.TemporaryDirectory(dir='/tmp') as beats, contextlib.ExitStack() as stack:
+            folder, beats = Path(os.path.realpath(folder)), Path(os.path.realpath(beats))
+            if not mac:
+                def covered(pid, names):
+                    with contextlib.suppress(OSError):
+                        env = dict(var.split(b'=', 1) for var in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0') if b'=' in var)
+                        marks = env.get(b'CLOUDROOM_TEST_MARKS', b'').split()
+                        return names[0] in marks and names[1] not in marks
+                    return False
+                listing = lambda: [int(entry) for entry in os.listdir('/proc') if entry.isdigit()]
+                stack.enter_context(mock.patch.object(preview, 'sandbox_checks', lambda: (listing, covered)))
+                stack.enter_context(mock.patch.object(preview, 'read_only', lambda data, *marks: ['/usr/bin/env', 'CLOUDROOM_TEST_MARKS=' + ' '.join(marks)]))
+                stack.enter_context(mock.patch.object(preview.MacJobs, 'refusal', lambda *_: None))
+                stack.enter_context(mock.patch.object(preview.MacJobs, 'containable', lambda *_: True))
+            stack.enter_context(mock.patch.object(preview, 'review', lambda *_: None))
+            results, jobs = {}, preview.MacJobs(folder)
+            jobs.wanted = {'core'}
+            core = SimpleNamespace(url='http://core', headers={}, key='core', sandbox=False, connection={},
+                                   config={'connectionFile': str(folder / 'cloudroom.json')},
+                                   fetch=lambda url, body, *_: results.__setitem__(url.rsplit('/', 1)[1], body) if body['state'] == 'done' else None)
+            # Each process rewrites its own file every 0.1 s: one in the command's process group, and one that left it with
+            # setsid after a fork, then forked again. The chain writes every 50th process and stops by itself after 30 s.
+            loop = 'for ($n = 0;; $n++) { open(F, ">", $ARGV[0]); print F "$$ $n"; close F; select(undef, undef, undef, .1) }'
+            chain = 'for ($n = 0;; $n++) { exit if fork or time - $^T > 30; next if $n % 50; open(F, ">", $ARGV[0]); print F "0 $n"; close F }'
+            def leaves(name, *also):
+                files = [f'{beats}/{name}-{kind}' for kind in ('group', 'left', *also)]
+                return (f"perl -e '{loop}' {files[0]} & perl -MPOSIX -e 'if (fork) {{ exit }} POSIX::setsid(); if (fork) {{ exit }} {loop}' {files[1]}; "
+                        + ''.join(f"perl -e '{chain}' {file} & " for file in files[2:])
+                        + 'while ' + ' || '.join(f'[ ! -s {file} ]' for file in files) + '; do sleep .05; done')
+            def running(*names):
+                before = [(beats / name).read_text() for name in names]
+                time.sleep(.5)
+                return [(beats / name).read_text() != text for name, text in zip(names, before)]
+            def run(command, level='read-only'):
+                preview.save(folder / 'config.json', {'macAccess': level})
+                job = uuid.uuid4().hex
+                jobs.execute(core, 'mac', {'id': job, 'command': command})
+                return results[job]['code']
+            def start(name):  # A read-only command that keeps running.
+                preview.save(folder / 'config.json', {'macAccess': 'read-only'})
+                job = uuid.uuid4().hex
+                thread = threading.Thread(target=jobs.execute, args=(core, 'mac', {'id': job, 'command': leaves(name) + '; sleep 30'}))
+                thread.start()
+                for _ in range(200):
+                    if (beats / f'{name}-left').exists():
+                        break
+                    time.sleep(.05)
+                return job, thread
+            def ended(job, thread):
+                thread.join(10)
+                return not thread.is_alive() and results[job]['code']
+            try:
+                # Others run on: what an earlier run of this helper left (until the first check), another helper's read-only
+                # command (a dev build), and on a Mac another sandbox.
+                other = f"perl -e '{loop}' {beats}/"
+                for marks, name in (((jobs.mark, jobs.mark + '.0', jobs.mark + '.0.job'), 'old'), (('other.read-only', 'other.read-only.job'), 'other')):
+                    started.append(subprocess.Popen([*preview.read_only(folder, *marks), 'sh', '-c', other + name]))
+                if mac:
+                    started.append(subprocess.Popen(['/usr/bin/sandbox-exec', '-p', '(version 1)(allow default)(deny mach-lookup)', 'sh', '-c', other + 'denies-all']))
+                # Full keeps what it leaves running; read-only ends it all with the command.
+                self.assertEqual(run(leaves('full'), 'full'), 0)
+                self.assertEqual(running('full-group', 'full-left'), [True, True])
+                self.assertEqual(run(leaves('read', 'chain')), 0)
+                self.assertEqual(running('read-group', 'read-left', 'read-chain'), [False] * 3)
+                # A running read-only command survives another one's end and the check that ends what earlier runs left.
+                first = start('first')
+                self.assertEqual(run('true'), 0)
+                jobs.end_unwanted()
+                self.assertEqual(running('first-group', 'first-left', 'old'), [True, True, False])
+                # The agent's stop, its sandbox's stream ending (Off here), and the helper's stop each end it all.
+                jobs.cancel(first[0])
+                self.assertEqual(ended(*first), -15)
+                second = start('second')
+                preview.save(folder / 'config.json', {'macAccess': 'off'})
+                jobs.wanted = set()
+                jobs.end_unwanted()
+                self.assertEqual(ended(*second), -9)
+                jobs.wanted = {'core'}
+                third = start('third')
+                jobs.close()
+                self.assertEqual(ended(*third), -9)
+                self.assertEqual(running(*(f'{name}-{kind}' for name in ('first', 'second', 'third') for kind in ('group', 'left'))), [False] * 6)
+                # After the stop nothing new starts, and the others still run.
+                self.assertEqual(run('true', 'full'), 126)
+                self.assertEqual(running('other', *(['denies-all'] if mac else [])), [True] * (1 + mac))
+            finally:
+                for process in started:
+                    process.kill(); process.wait()
+                for beat in beats.iterdir():
+                    with contextlib.suppress(OSError, ValueError):
+                        pid = int(beat.read_text().split()[0])
+                        if pid > 0:  # Chains write 0 and stop by themselves.
+                            os.kill(pid, 9)
 
     def test_ask_first_popup_shows_agent_text_as_text(self):
         # Security sweep: line breaks in a folder name could push the command out of view in the Ask first popup.

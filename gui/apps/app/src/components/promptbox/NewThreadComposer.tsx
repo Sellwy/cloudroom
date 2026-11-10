@@ -1,4 +1,4 @@
-import { ClaudeConnectionButton } from "@/components/ClaudeConnection";
+import { CONNECT_AGENT_IDS, ConnectAgentsButton } from "@/components/ConnectAgentsButton";
 import {
   useCloudroomConnection,
   cloudHarness,
@@ -533,8 +533,14 @@ export function NewThreadComposer({
     [currentProject?.sources],
   );
   const projectOptions = useMemo(
-    () => projects?.map(({ id, name }) => ({ id, name })) ?? [],
-    [projects],
+    () =>
+      sidebarNavigationQuery.data?.projects.map(({ id, name, updatedAt, threads }) => ({
+        id,
+        name,
+        // Its newest thread: the picker lists recently used projects first.
+        updatedAt: Math.max(updatedAt, ...threads.map((thread) => thread.updatedAt)),
+      })) ?? [],
+    [sidebarNavigationQuery.data],
   );
 
   const hostsQuery = useHosts();
@@ -1840,7 +1846,8 @@ export function NewThreadComposer({
           mentionRanges={promptDraft.mentions}
           onChange={(text, mentions) => {
             // An edit can remove what the last error was about, so the old error must not linger.
-            setComposerError(null);
+            // Guarded: even a same-value setState can re-render the composer on every key.
+            if (composerError !== null) setComposerError(null);
             promptDraft.setTextAndMentions(text, mentions);
           }}
           onSubmit={() => void handleSubmit(options.blockedReason ?? null)}
@@ -1914,6 +1921,7 @@ export function NewThreadComposer({
                       },
                     }
                   : {}),
+                onAddMachine: () => navigate(getSettingsRoutePath("machines")),
               },
               ...(executionTarget === "local" && !cloudLocked && !locks.environment && cloudCanRunHarness(selectedProviderId)
                 ? { hint: <TryCloudHint draftLength={promptDraft.text.trim().length} github={cloudBranchPickerShown} onUseCloud={selectCloudTarget} /> }
@@ -1977,7 +1985,7 @@ export function NewThreadComposer({
                 <Icon name="AlertTriangle" className="size-3.5 shrink-0 text-warning-text" aria-hidden />
                 {vps.data.health ? `Your VPS is busy (${vps.data.busy}), so this thread starts in Cloud.` : "Your VPS is offline, so this thread starts in Cloud."}
               </p>
-            ) : null}<StarterPrompts onPick={pickStarter} /><OgLetter /><FreePlanTip /></>,
+            ) : null}<StarterPrompts onPick={pickStarter} fallback={<FreePlanTip />} /><OgLetter /></>,
             banner:
               executionTarget === "cloud" ? (
                 cloudBlockedReason === null ? null : (
@@ -2165,12 +2173,14 @@ export function NewThreadComposer({
     <NewThreadComposerStateRenderer
       render={children}
       state={{
-        connectionFooter: providerOptions.some(provider => provider.value === "claude-code") ? (
-          <ClaudeConnectionButton
+        connectionFooter: providerOptions.some((provider) => CONNECT_AGENT_IDS.includes(provider.value)) ? (
+          <ConnectAgentsButton
             target={executionTarget}
             hostId={executionOptionsRouting.hostId}
             environmentId={executionOptionsRouting.environmentId}
-            presentation="footer"
+            primaryHostId={primaryHostId}
+            providerIds={providerOptions.map((provider) => provider.value)}
+            selectedProviderId={selectedProviderId}
           />
         ) : null,
         projectId,

@@ -51,14 +51,14 @@ export const cloudroomStatusSchema = z.object({
   })).nullable().default([]),
 });
 
-const CORE_HARNESS_IDS: Record<string, string> = { "acp-cursor": "cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "hermes", "acp-devin": "devin", "acp-droid": "droid", "acp-openclaw": "openclaw" };
+const CORE_HARNESS_IDS: Record<string, string> = { "acp-cursor": "cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "hermes", "acp-devin": "devin", "acp-droid": "droid", "acp-kimi": "kimi", "acp-openclaw": "openclaw" };
 
 export function cloudHarness(status: z.infer<typeof cloudroomStatusSchema> | undefined, harness: string | undefined) {
   const id = harness === undefined ? undefined : (CORE_HARNESS_IDS[harness] ?? harness);
   return status?.harnesses?.find((item) => item.id === id);
 }
 
-const CLOUD_HARNESS_IDS = new Set(["claude-code", "codex", "pi", "cursor", "fx", "opencode", "hermes", "devin", "droid", "openclaw"]);
+const CLOUD_HARNESS_IDS = new Set(["claude-code", "codex", "pi", "cursor", "fx", "opencode", "hermes", "devin", "droid", "kimi", "openclaw"]);
 export function cloudCanRunHarness(harness: string): boolean {
   return CLOUD_HARNESS_IDS.has(CORE_HARNESS_IDS[harness] ?? harness);
 }
@@ -68,7 +68,7 @@ export function cloudCatalogKnown(status: z.infer<typeof cloudroomStatusSchema> 
   return status?.ready === true && status.harnesses !== null;
 }
 
-const HARNESS_NAMES: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", pi: "Pi", cursor: "Cursor", fx: "fx", opencode: "opencode", hermes: "Hermes Agent", devin: "Devin", droid: "Droid", openclaw: "OpenClaw" };
+const HARNESS_NAMES: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", pi: "Pi", cursor: "Cursor", fx: "fx", opencode: "opencode", hermes: "Hermes Agent", devin: "Devin", droid: "Droid", kimi: "Kimi Code", openclaw: "OpenClaw" };
 export function cloudHarnessNames(status: z.infer<typeof cloudroomStatusSchema> | undefined): string {
   return (status?.harnesses ?? []).map((item) => HARNESS_NAMES[item.id] ?? item.id).join(", ") || "none";
 }
@@ -108,9 +108,15 @@ export function useCloudroomAccount() {
 export function useCloudroomSignIn() {
   const client = useQueryClient();
   return useMutation({
+    // Returns the sign-in link, so setup can offer it for a browser other than the default.
     mutationFn: async (action: "signIn" | "cancel") => {
-      if (action === "cancel") await sdk.cloudroom.cancel();
-      else openUrlInExternalBrowser((await sdk.cloudroom.signIn({})).url);
+      if (action === "cancel") {
+        await sdk.cloudroom.cancel();
+        return null;
+      }
+      const { url } = await sdk.cloudroom.signIn({});
+      openUrlInExternalBrowser(url);
+      return url;
     },
     onSuccess: () => client.invalidateQueries({ queryKey: ["cloudroom-account"] }),
     onError: (error) => appToast.error(error.message),
@@ -172,6 +178,13 @@ export type HostDesktopUpdate = NonNullable<ReturnType<typeof useHostDesktopUpda
 
 export function useCloudroomThread(threadId: string, enabled: boolean) {
   return useQuery({ queryKey: ["cloudroom-thread", threadId], enabled, queryFn: async ({ signal }) => threadStatusSchema.parse(await (await fetchWithAppSurface(`/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}`, { signal })).json()), refetchInterval: 1500 });
+}
+
+const cloudLoginsSchema = z.object({ issues: z.array(z.object({ provider: z.enum(["codex", "claude-code", "acp-cursor"]), threads: z.number(), loops: z.number() })) });
+/** Agents Cloud refused for their login, with the threads and loops waiting on each. A local call; the server reads the
+ *  website's loops at most every 15 minutes. */
+export function useCloudLogins(enabled: boolean) {
+  return useQuery({ queryKey: ["cloud-logins"], enabled, queryFn: async ({ signal }) => cloudLoginsSchema.parse(await (await fetchWithAppSurface("/api/v1/cloudroom/cloud-logins", { signal })).json()).issues, refetchInterval: 60_000 });
 }
 
 export function useSetCloudReasoning(threadId: string) {
@@ -344,6 +357,19 @@ export function useImportSessions() {
         onProgress?.(Math.min(index + 20, sessions.length));
       }
       return result;
+    },
+    onSettled: () => client.invalidateQueries(),
+  });
+}
+
+export function useImportConductorExport() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ hostId, clientHostId, onPicked }: { hostId: string; clientHostId: string; onPicked?: () => void }) => {
+      const { path } = await sdk.hosts.pickFolder({ hostId, clientHostId });
+      if (!path) return null;
+      onPicked?.();
+      return sdk.cloudroom.importConductorExport(hostId, path);
     },
     onSettled: () => client.invalidateQueries(),
   });

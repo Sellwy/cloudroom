@@ -40,7 +40,7 @@ Spawning:
                                    none). Required when the provider declares inputs,
                                    refused when it does not
     --machine <id-or-name>         Run on a machine; local selects this computer, cloud selects the Rust core (--host is an alias)
-    --request-id <id>              Stable Cloud creation ID; reuse after an unconfirmed submission
+    --request-id <id>              Stable creation ID; after an unanswered spawn, re-run with it to get that thread, not a duplicate
     --service-tier <tier>          Service tier: fast, default
     --permission-mode <mode>       Permission mode: accept-edits, auto, or full
     --plan                         Send the prompt as the provider's /plan action (plan first, execute after approval)
@@ -266,7 +266,8 @@ Messaging:
     agent, /exit or Ctrl+C leaves. Inside Herdr (HERDR_ENV=1) it reports
     idle, working, or blocked to the pane and registers itself as the resume command.
 
-  room-cli thread tell <id> <message>            Send a follow-up message
+  room-cli thread tell <id> [message]            Send a follow-up message
+    --message-file <path>                  Read the message from a UTF-8 file, or - for stdin; use it for long messages
     --mode <mode>                          Message mode: steer, queue, or auto; default: Local steer, Cloud queue
     --model <model>                        Model override for this turn
     --reasoning-level <level>              Reasoning level override
@@ -274,6 +275,7 @@ Messaging:
     --send-at <when>                       Dispatch at an ISO 8601 timestamp or a duration from now (30s, 10m, 2h, 7d)
     --file <path>                          CLI-local absolute path, file: URL, or uploaded file path
     --image <path>                         CLI-local absolute path, file: URL, or uploaded image path
+    --request-id <id>                      Cloud only: resend an unconfirmed message with the request ID it printed, so it isn't added twice
 
   Tell queues Cloud messages automatically. For Local threads it steers into the active
   turn. Use --mode queue for non-urgent follow-ups that can wait until the agent

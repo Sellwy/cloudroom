@@ -47,35 +47,40 @@ describe("public thread default routes", () => {
         path: "/tmp/thread-defaults-create",
       });
 
-      const response = await harness.app.request("/api/v1/threads", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          origin: "app",
-          projectId: project.id,
-          providerId: "codex",
-          model: "gpt-5-mini",
-          serviceTier: "fast",
-          reasoningLevel: "high",
-          permissionMode: "workspace-write",
-          input: [
-            { type: "text", text: "Create with explicit execution options" },
-          ],
-          environment: {
-            type: "host",
-            hostId: host.id,
-            workspace: {
-              type: "unmanaged",
-              path: null,
-            },
+      const create = (text = "Create with explicit execution options") =>
+        harness.app.request("/api/v1/threads", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
           },
-        }),
-      });
+          body: JSON.stringify({
+            origin: "app",
+            requestId: "create-once",
+            projectId: project.id,
+            providerId: "codex",
+            model: "gpt-5-mini",
+            serviceTier: "fast",
+            reasoningLevel: "high",
+            permissionMode: "workspace-write",
+            input: [{ type: "text", text }],
+            environment: {
+              type: "host",
+              hostId: host.id,
+              workspace: {
+                type: "unmanaged",
+                path: null,
+              },
+            },
+          }),
+        });
+      const response = await create();
 
       expect(response.status).toBe(201);
       const createdThread = threadSchema.parse(await readJson(response));
+      // A retry with the same request ID gets that thread, not a duplicate (#860).
+      const retried = threadSchema.parse(await readJson(await create()));
+      expect(retried.id).toBe(createdThread.id);
+      expect((await create("Create with other options")).status).toBe(409);
       const queuedStart = await waitForQueuedCommand(
         harness,
         ({ command }) =>
@@ -539,15 +544,63 @@ describe("public thread default routes", () => {
     });
   });
 
-  it("returns an actionable error when an explicitly requested provider's model catalog cannot be loaded", async () => {
+  it.each([
+    {
+      errorCode: "command_failed",
+      status: 503,
+      body: {
+        code: "model_catalog_unavailable",
+        message: expect.stringContaining("Unable to load codex models"),
+        details: { providerId: "codex", code: "failed", canRestart: true },
+        retryable: true,
+      },
+    },
+    // A broken install needs a reinstall, not a retry (#907).
+    {
+      errorCode: "missing_executable",
+      status: 409,
+      body: {
+        code: "provider_cli_missing",
+        message: expect.stringContaining("Reinstall"),
+        details: { providerId: "codex", code: "missing_executable" },
+        retryable: false,
+      },
+    },
+    // A signed-out Grok needs its login, not a wait for the host (#1160).
+    {
+      providerId: "acp-grok",
+      errorCode: "auth_required",
+      status: 409,
+      body: {
+        code: "provider_auth_required",
+        message:
+          "Grok Build is not signed in on this host. Run `grok login` on the machine to sign in. Then try again.",
+        details: { providerId: "acp-grok", code: "auth_required" },
+        retryable: false,
+      },
+    },
+    // Cursor keeps base behavior.
+    {
+      providerId: "acp-cursor",
+      errorCode: "auth_required",
+      status: 503,
+      body: {
+        code: "model_catalog_unavailable",
+        message: expect.stringContaining("Unable to load acp-cursor models"),
+        details: { providerId: "acp-cursor", code: "auth_required" },
+        retryable: true,
+      },
+    },
+  ])("returns an actionable catalog error ($errorCode)", async (failure) => {
+    const providerId = failure.providerId ?? "codex";
     await withTestHarness(async (harness) => {
       const { host, session } = seedHostSession(harness.deps);
       registerProviderHostRpcResponder(harness, {
         hostId: host.id,
         sessionId: session.id,
         modelErrorsByProviderId: {
-          codex: {
-            errorCode: "command_failed",
+          [providerId]: {
+            errorCode: failure.errorCode,
             errorMessage: "Codex model discovery failed",
           },
         },
@@ -568,7 +621,7 @@ describe("public thread default routes", () => {
         body: JSON.stringify({
           origin: "cli",
           projectId: project.id,
-          providerId: "codex",
+          providerId,
           input: [{ type: "text", text: "Create without defaults" }],
           environment: {
             type: "reuse",
@@ -577,13 +630,8 @@ describe("public thread default routes", () => {
         }),
       });
 
-      expect(response.status).toBe(503);
-      await expect(readJson(response)).resolves.toEqual({
-        code: "model_catalog_unavailable",
-        message: expect.stringContaining("Unable to load codex models"),
-        details: { providerId: "codex", code: "failed", canRestart: true },
-        retryable: true,
-      });
+      expect(response.status).toBe(failure.status);
+      await expect(readJson(response)).resolves.toEqual(failure.body);
       expect(
         listThreadsWithPendingInteractionState(harness.db, {
           projectId: project.id,

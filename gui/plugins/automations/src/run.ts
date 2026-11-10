@@ -128,7 +128,7 @@ export function lastNote(reply: string): string | null {
 
 // Loop run records (ADR 0298): every run reports what it did, why, and how sure it was. Same text as Cloud loops.
 const REPORT_ASK =
-  'Before replying, run `room-cli loop report --outcome done|acted|needs-you|failed --confidence high|medium|low --reason "why"`, plus one `--action "..."` per change.';
+  'Before replying, run `room-cli loop report --outcome done|acted|needs-you|failed --confidence high|medium|low --reason "why"`, plus up to ten `--action "..."` values: group related changes into one, as the run\'s transcript keeps the full details.';
 
 /** Reports are saved on the website, so a signed-out app can't send them (#872). Only a confirmed sign-out counts:
  *  a failed, unknown, or slow (over 2 s) status keeps today's report instruction. */
@@ -207,26 +207,52 @@ export async function executeAgentRun(
       pastNotes(bb, db, args.automation.id),
       reportAsk(bb.sdk),
     ]);
-    const thread = sdkThreadSchema.parse(
-      await bb.sdk.threads.spawn({
-        projectId: args.automation.projectId,
-        environment: args.execution.environment,
-        prompt: withEvents(
-          args.execution.prompt + memoryText(notes) + ask,
-          args.events,
-        ),
-        title: args.automation.name,
-        ...(await loopAgent(bb.sdk, args.automation, args.execution)),
-        permissionMode: args.execution.permissionMode,
-      }),
-    );
-    setAutomationRunThread(db, { runId: args.run.id, threadId: thread.id });
-    markAutomationThread(db, {
-      automationId: args.automation.id,
-      runId: args.run.id,
-      threadId: thread.id,
-      now: Date.now(),
-    });
+    const input = {
+      requestId: args.run.id,
+      projectId: args.automation.projectId,
+      environment: args.execution.environment,
+      prompt: withEvents(
+        args.execution.prompt + memoryText(notes) + ask,
+        args.events,
+      ),
+      title: args.automation.name,
+      ...(await loopAgent(bb.sdk, args.automation, args.execution)),
+      permissionMode: args.execution.permissionMode,
+    };
+    let spawned: unknown;
+    try {
+      spawned = await bb.sdk.threads.spawn(input);
+    } catch (error) {
+      if (!unanswered(error)) throw error;
+      // A slow create (a first clone, a waking machine) can outlast the request and still make the thread. The run's
+      // ID names it, so asking once more gets it, not a second one, and the run links the work it started (#1293),
+      // like `room-cli thread spawn`. Unawaited, so other due loops don't wait; the running run blocks this loop's.
+      void bb.sdk.threads
+        .spawn(input)
+        .then(async (late) => {
+          const thread = linkSpawnedThread(db, args, late);
+          // Its turn may have ended before this answer, when its idle or failed event had no run to settle.
+          if (thread.status === "idle" || thread.status === "error")
+            await closeAutomationRunForSettledThread(bb, db, {
+              threadId: thread.id,
+              threadCreatedAt: thread.createdAt,
+              status: thread.status === "idle" ? "idle" : "failed",
+            });
+        })
+        .catch((late: unknown) => {
+          if (db.open) settleDispatchFailure(bb, db, args, late);
+        })
+        .finally(() =>
+          publishAutomationChange(bb, args.automation.projectId, [
+            "automations-changed",
+            "automation-runs-changed",
+          ]),
+        )
+        // Only a closed or broken database fails here (the plugin reloaded): nothing is left to record.
+        .catch(() => undefined);
+      return;
+    }
+    linkSpawnedThread(db, args, spawned);
   } catch (error) {
     settleDispatchFailure(bb, db, args, error);
   } finally {
@@ -235,6 +261,30 @@ export async function executeAgentRun(
       "automation-runs-changed",
     ]);
   }
+}
+
+/** No answer, so the thread may exist: a timeout or a dropped connection. */
+function unanswered(error: unknown): boolean {
+  return (
+    error instanceof TypeError ||
+    (error instanceof Error && error.name === "BbRequestTimeoutError")
+  );
+}
+
+function linkSpawnedThread(
+  db: Db,
+  args: AgentRunArgs,
+  spawned: unknown,
+): SdkThread {
+  const thread = sdkThreadSchema.parse(spawned);
+  setAutomationRunThread(db, { runId: args.run.id, threadId: thread.id });
+  markAutomationThread(db, {
+    automationId: args.automation.id,
+    runId: args.run.id,
+    threadId: thread.id,
+    now: Date.now(),
+  });
+  return thread;
 }
 
 function settleDispatchFailure(

@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webFrame } from "electron";
-import { appCommandIdSchema } from "@cloudroom/domain";
+import { appCommandIdSchema, appShortcutInputSchema } from "@cloudroom/domain";
 import {
   desktopBrowserImportOutcomeSchema,
   desktopBrowserImportSourceSchema,
@@ -45,6 +45,7 @@ import {
   BB_DESKTOP_GET_INFO_CHANNEL,
   BB_DESKTOP_INFO_CHANGED_CHANNEL,
   BB_DESKTOP_INSTALL_UPDATE_CHANNEL,
+  BB_DESKTOP_MOVE_TO_APPLICATIONS_CHANNEL,
   BB_DESKTOP_OPEN_EXTERNAL_URL_CHANNEL,
   BB_DESKTOP_SET_THEME_CHANNEL,
   BB_DESKTOP_FOCUS_WINDOW_CHANNEL,
@@ -89,7 +90,7 @@ import {
   BB_DESKTOP_TOP_RIGHT_DRAG_CHANNEL,
   BB_DESKTOP_OPEN_NEW_TAB_CHANNEL,
   BB_DESKTOP_OPEN_COMPUTER_CHANNEL,
-  BB_DESKTOP_RECONNECT_COMPUTER_CHANNEL,
+  BB_DESKTOP_SHOW_THIS_COMPUTER_CHANNEL,
   BB_DESKTOP_REFRESH_COMPUTERS_CHANNEL,
   BB_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL,
   BB_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
@@ -411,6 +412,11 @@ const bbDesktopApi: BbDesktopApi = {
   installUpdate() {
     return invokeInstallUpdate();
   },
+  moveToApplications() {
+    return ipcRenderer
+      .invoke(BB_DESKTOP_MOVE_TO_APPLICATIONS_CHANNEL)
+      .then((moved: unknown) => moved === true, () => false);
+  },
   onChange(listener: BbDesktopInfoChangeHandler): BbDesktopInfoUnsubscribe {
     return addListener(listeners, listener);
   },
@@ -451,8 +457,8 @@ const bbDesktopApi: BbDesktopApi = {
   async openComputer(handle: string | null): Promise<void> {
     await ipcRenderer.invoke(BB_DESKTOP_OPEN_COMPUTER_CHANNEL, handle);
   },
-  async reconnectComputer(keepTrying: boolean): Promise<void> {
-    await ipcRenderer.invoke(BB_DESKTOP_RECONNECT_COMPUTER_CHANNEL, keepTrying);
+  async showThisComputer(): Promise<void> {
+    await ipcRenderer.invoke(BB_DESKTOP_SHOW_THIS_COMPUTER_CHANNEL);
   },
   refreshComputers(): void {
     ipcRenderer.send(BB_DESKTOP_REFRESH_COMPUTERS_CHANNEL);
@@ -497,7 +503,7 @@ ipcRenderer.on(BB_DESKTOP_OPEN_NEW_TAB_CHANNEL, () => {
 
 forwardParsed(
   BB_DESKTOP_APP_COMMAND_CHANNEL,
-  appCommandIdSchema,
+  z.union([appCommandIdSchema, appShortcutInputSchema]),
   appCommandListeners,
 );
 

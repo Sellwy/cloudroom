@@ -412,7 +412,14 @@
       "dependsOn": ["^topo", "@cloudroom/plugin-build#generate"]
     },
     "@cloudroom/server#topo": {
-      "dependsOn": ["^topo", "@cloudroom/server#generate:bb-official-marketplace"]
+      "dependsOn": ["^topo", "@cloudroom/server#generate:bb-official-marketplace"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/../core/integrations/bb/client.ts"]
+    },
+    // The SDK imports Core's Command Guard, so every task that resolves the SDK's
+    // sources hashes it.
+    "@get-bb/plugin-sdk#topo": {
+      "dependsOn": ["^topo"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/../core/src/runtime/command-guard.mjs", "$TURBO_ROOT$/../core/src/runtime/command-guard.d.mts"]
     },
     "@cloudroom/server#generate:bb-official-marketplace": {
       "dependsOn": [],
@@ -929,6 +936,9 @@
       "dependsOn": ["@get-bb/plugin-sdk#build:types", "topo"]
     },
     "bb-plugin-provider-retry#typecheck": {
+      "dependsOn": ["@get-bb/plugin-sdk#build:types", "topo"]
+    },
+    "bb-plugin-internet-watch#typecheck": {
       "dependsOn": ["@get-bb/plugin-sdk#build:types", "topo"]
     },
     "bb-plugin-organization#typecheck": {

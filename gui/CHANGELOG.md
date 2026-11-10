@@ -2,6 +2,76 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 148
+
+Cloud Credits last 20% longer (2026-11-10)
+
+### Changes
+
+- A CPU-hour on a Cloud sandbox now costs 500 credits instead of 600, with the same plans and prices.
+- The project picker for new threads is one clean list: your projects first, repos you can add below.
+- Agent questions and Settings → Accounts have a simpler, cleaner look. Press a number key to answer.
+- The Cloudroom name shows at the top of the window. Turn it off with "Show Cloudroom name" in Settings.
+- Threads start with a shorter system prompt, and custom instructions are sent once per thread.
+- Import chats now brings over your Conductor chats.
+- Security fixes.
+
+## 147
+
+Every keystroke shows instantly (2026-11-10)
+
+### Changes
+
+- Typed letters appear right away, and the sidebar only redraws the rows that changed.
+- Local threads wait out an internet drop and continue on their own once you are back online.
+- When Codex signs out in a Cloud thread, a banner with Reconnect fixes it in place.
+- Claude Fable 5.2 is in the model pickers for Claude Code, Cursor, and fx.
+- The sidebar slides open smoothly, and zooming is faster.
+- Side chats show the context window ring.
+- A project you collapse in the sidebar stays collapsed.
+
+## 146
+
+One click clears a full Cloud disk (2026-11-08)
+
+### Changes
+
+- When a Cloud disk fills up, one pill with a Clear caches & builds button frees space.
+- Hover the effort label to step reasoning effort up or down with small arrows.
+- Typing a thread name after @ keeps that thread above files and folders with similar names.
+- Forked threads show a thin divider in the chat instead of a banner.
+- Settings → Analytics shows when your Cloud Credits were used.
+- Cloud threads now accept folder and project tags.
+- Security fixes.
+
+## 145
+
+Long messages fold to fit (2026-11-08)
+
+### Changes
+
+- Long messages you send collapse to their start and end, so the chat stays easy to scan.
+- Kimi Code now runs in Local and Cloud threads.
+- The chat scrollbar grows as your mouse gets close, so it is easier to grab.
+- A new Connect agents button replaces the Claude check, and the Claude Code install shows progress with a Cancel button.
+- Agents can move their own thread into a fresh worktree with room-cli thread worktree.
+- When your app is 3 or more days behind, a small card above the chat offers the update.
+- A refused skill message no longer blocks every message after it.
+
+## 144
+
+Switch accounts, every stalled chat resumes (2026-11-07)
+
+### Changes
+
+- When a plan limit stops your agents, switching accounts once continues every stopped thread, Local and Cloud.
+- A Mac app opened from the disk image now offers to move itself to Applications in one click, so updates work.
+- App shortcuts like Cmd+J and Cmd+T now work while a page in the built-in browser has focus.
+- The Windows installer is about 30% smaller and installs faster.
+- Background dev servers keep running through account switches, harness switches, and /clear.
+- Sign-in now has a Copy link button, for when your default browser is not the one you use.
+- Security fixes.
+
 ## 143
 
 All your logins on one page (2026-11-06)

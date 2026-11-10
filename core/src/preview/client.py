@@ -699,8 +699,8 @@ MAC_LIMIT = 16 * 1024 * 1024
 MAC_LEVELS = ('off', 'read-only', 'ask', 'full')
 # Read-only commands (ADR 0186): no file writes outside temp folders, no signals to other processes, and no tools that
 # drive apps or system settings. Beyond those named tools, they cannot run programs from the writable temp folders, open
-# apps or URLs through Launch Services, send Apple Events, create background jobs, or write preferences through cfprefsd.
-# macOS also refuses setuid tools like ps and top here; pgrep and lsof still work.
+# apps or URLs through Launch Services, send Apple Events, create launchd jobs, or write preferences through cfprefsd.
+# Nothing they start outlives them (end). macOS also refuses setuid tools like ps and top here; pgrep and lsof still work.
 # They also cannot reach this Mac's own servers and sockets (the app's local API, ssh-agent, Docker; DNS still works) or
 # read Cloudroom's folders beyond its tools, so they cannot act through the app or its tokens (ADR 0260). The internet works.
 READ_ONLY = ('(version 1)(allow default)(deny file-write*)'
@@ -751,18 +751,91 @@ def hidden_folders(data):
     return real_paths([data, home / '.gui-cloudroom', home / '.gui-cloudroom-dev']), real_paths(machines)
 
 
-def read_only(data):
-    """sandbox-exec arguments for a read-only command; `data` is Cloudroom's folder, which holds its tokens."""
+def read_only(data, *marks):
+    """sandbox-exec arguments for a read-only command; `data` is Cloudroom's folder, which holds its tokens. The sandbox
+    denies the `marks`, names no Mach service has, so end() can find all the command started."""
     data = data.resolve()  # Seatbelt matches real paths.
     folders, machines = hidden_folders(data)
     params = {'DATA': data, 'DATA_BIN': data / 'bin', 'DATA_HARNESS': data / 'browser-harness',
               **{f'FOLDER_{n}': path for n, path in enumerate(folders)},
               **{f'MACHINE_{n}': path for n, path in enumerate(machines)}}
     subpaths = lambda name, paths: ''.join(f' (subpath (param "{name}_{n}"))' for n in range(len(paths)))
+    names = ''.join(f' (global-name "{mark}")' for mark in marks)  # Labels and hex only, so nothing to escape.
     # Machine installs come last, after the tools and temp-folder exceptions, so neither can reopen them.
-    profile = (f'{READ_ONLY}(deny file-read*{subpaths("FOLDER", folders)}){READ_ONLY_TOOLS}'
+    profile = (READ_ONLY + (f'(deny mach-lookup{names})' if names else '') +
+               f'(deny file-read*{subpaths("FOLDER", folders)}){READ_ONLY_TOOLS}'
                f'(deny file-read* file-write*{subpaths("MACHINE", machines)} {READ_ONLY_OLD_KEYS})')
     return ['/usr/bin/sandbox-exec', *(arg for key, path in params.items() for arg in ('-D', f'{key}={path}')), '-p', profile]
+
+
+def sandbox_checks():
+    """libSystem's process list and sandbox check: `listing()` gives every PID, and `covered(pid, names)` whether that
+    process's sandbox denies names[0] (a mark, read_only) but allows names[1]. Raises OSError when this Mac can't tell. No
+    process carries a mark off macOS, where read-only commands never run."""
+    if sys.platform != 'darwin':
+        return lambda: [], lambda pid, names: False
+    try:
+        import ctypes
+        system = ctypes.CDLL('/usr/lib/libSystem.B.dylib')
+        check, count = system.sandbox_check, system.proc_listallpids
+        check.argtypes, check.restype = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int), ctypes.c_int  # The name follows, as `...`.
+        kind = 2 | ctypes.c_int.in_dll(system, 'SANDBOX_CHECK_NO_REPORT').value  # SANDBOX_FILTER_GLOBAL_NAME, not logged.
+    except (ImportError, AttributeError, ValueError) as error:
+        raise OSError('This Mac cannot check sandboxes') from error
+    def listing():
+        size = max(count(None, 0), 0) + 256
+        while True:
+            pids = (ctypes.c_int * size)()
+            found = count(pids, ctypes.sizeof(pids))
+            if found <= 0:  # 0 is an error too: the list always holds launchd and this helper.
+                raise OSError('This Mac cannot list its processes')
+            if found < size:
+                return [pid for pid in pids[:found] if pid > 0]
+            size *= 2  # A full list may have left some out.
+    def covered(pid, names):
+        return check(pid, b'mach-lookup', kind, ctypes.c_char_p(names[0])) == 1 and check(pid, b'mach-lookup', kind, ctypes.c_char_p(names[1])) == 0
+    return listing, covered
+
+
+def marks(mark, allowed=None):
+    """The names for covered(): the mark, and one its processes' sandbox allows, by default a random one beside it. Many
+    other sandboxes deny every name, and so do processes that have ended, so those never count."""
+    return [mark.encode(), (allowed or f'{mark}.{uuid.uuid4().hex[:16]}').encode()]
+
+
+def marked(mark, allowed=None):
+    """This user's live processes in a read-only sandbox with this mark (read_only). They can leave their process group,
+    session, or parent, never their sandbox. Raises OSError when this Mac can't tell."""
+    listing, covered = sandbox_checks()
+    names = marks(mark, allowed)
+    return [pid for pid in listing() if covered(pid, names)]
+
+
+def end(mark, allowed=None, seconds=5):
+    """Ends every process marked() would find, each as soon as it is found. One may start another and end before its own
+    check, so the list is taken again until 20 lists in a row show none alive; after the first, only processes new to the
+    list, and those killed but not gone yet, need a check. SIGKILL, since it only read and a handler could start more. A
+    PID is killed right after its check, and macOS hands out new PIDs in order, so it is still that process's. True once
+    none is left; False if some still run after `seconds`, or if this Mac can't tell."""
+    try:
+        listing, covered = sandbox_checks()
+        names, deadline, previous, alive, clean = marks(mark, allowed), time.monotonic() + seconds, set(), set(), 0
+        while clean < 20:
+            pids = listing()
+            found = set()
+            for pid in [*alive, *(pid for pid in pids if pid not in previous)]:
+                if covered(pid, names):
+                    with contextlib.suppress(OSError):
+                        os.kill(pid, signal.SIGKILL)
+                    found.add(pid)
+            previous, alive, clean = set(pids), found, 0 if found else clean + 1
+            if found and time.monotonic() > deadline:
+                return False
+        return True
+    except OSError:
+        return False
+
+
 ASK = '''on run argv
 activate
 display dialog (item 1 of argv) with title "Cloudroom" buttons {"Allow", "Allow for this sandbox", "Deny"} default button "Deny" cancel button "Deny" with icon caution giving up after 300
@@ -795,14 +868,21 @@ MAC_PART = 1024 * 1024
 MAC_POST_SECONDS = 60
 # New per helper process: when it changes, Core ends jobs the old process was running (#569).
 MAC_BOOT = uuid.uuid4().hex
+# A sandbox's agent has root, so it can answer in place of Core: the helper keeps no more than a real Core sends. The
+# longest job line comes from cores up to 0.1.75, which send a job's input inside it as hex, beside a 64 KiB command
+# that JSON escaping can make 6 times longer.
+MAC_LINE = 2 * MAC_LIMIT + 1024 * 1024
 
 
 def mac_stdin(core, device, job):
     """A job's input, downloaded after confirming it, so a big push never holds up other jobs on the stream (#576).
-    Older cores send it inside the job instead. None if it can't be downloaded."""
+    Older cores send it inside the job instead. None if it can't be downloaded or is over Core's 16 MiB limit."""
     size = job.get('stdin_bytes')
     if not size:
-        return job.get('stdin') or ''
+        stdin = job.get('stdin') or ''
+        return stdin if len(stdin) <= 2 * MAC_LIMIT else None
+    if type(size) is not int or not 0 < size <= MAC_LIMIT:
+        return None
     url = core.url + '/v1/mac/jobs/' + urllib.parse.quote(job['id']) + '/stdin?device=' + urllib.parse.quote(device)
     for _ in range(3):
         try:
@@ -839,7 +919,8 @@ def saved_level(config):
 
 
 # Each Mac command also goes to the website's Jev check (ADR 0224). It runs beside the job and never delays it:
-# at most four reports in flight, a repeated command is skipped for an hour, and failures are dropped.
+# at most four reports in flight, a repeated command is skipped for an hour, and failures are dropped. Commands are
+# kept as fixed-size hashes, at most 4,096 of them, so a sandbox's many long commands can't fill memory.
 REVIEWS = {'sent': {}, 'lock': threading.Lock(), 'slots': threading.BoundedSemaphore(4)}
 SCRIPT_TYPES = ('.sh', '.bash', '.zsh', '.py', '.js', '.mjs', '.cjs', '.ts', '.rb', '.pl')
 
@@ -857,11 +938,14 @@ def script_of(job):
 
 def review(core, job, level, script):
     account, token = (core.connection.get('account') or {}).get('id'), core.connection.get('sandboxToken')
-    key, now = (core.url, job.get('command')), time.monotonic()
+    key = hashlib.sha256(f"{core.url}\0{job.get('command')}".encode(errors='surrogatepass')).digest()
+    now = time.monotonic()
     with REVIEWS['lock']:
         sent = REVIEWS['sent']
         for old in [k for k, at in sent.items() if now - at > 3600]:
             del sent[old]
+        if len(sent) >= 4096:
+            sent.clear()
         if not account or not token or key in sent or not REVIEWS['slots'].acquire(blocking=False):
             return
         sent[key] = now
@@ -962,20 +1046,32 @@ class MacJobs:
     """Mac access (ADR 0113, levels in ADR 0186): run commands from the user's cloud agents as this user, only while enabled."""
     def __init__(self, folder):
         self.folder, self.running, self.lock = folder, {}, threading.Lock()
-        # Jobs the agent stopped before they started; execute skips them.
-        self.cancelled = set()
+        # How many jobs taken from the streams are not finished, by ID (two sandboxes' Cores can use the same one), and which
+        # of those IDs the agent stopped before they started; execute skips those. A stop for any other job is dropped,
+        # so a sandbox's Core can't fill this.
+        self.taken, self.cancelled = {}, set()
         # Ask first: one dialog at a time. "Allow for this sandbox" trusts every agent on that sandbox's core (jobs carry no
         # thread), until the helper restarts or the access level changes.
         self.asking, self.trusted, self.level = threading.Lock(), set(), None
         # Whether each sandbox core has a key list, asked once per wake (limited), one question at a time. The helper
         # restarts with every app launch, so this stays small.
         self.lists, self.checking = {}, threading.Lock()
+        # Read-only commands carry this helper's mark, this run's (`boot`), and their own (read_only). `sandboxes` maps
+        # each mark to end to the core whose stream keeps it (None: none), the name its processes must allow (marked), and
+        # its running shell; end_unwanted ends each until nothing carries it, starting with what earlier runs left.
+        # `stopping`: no command starts any more. `contained`: end() was seen to work on this Mac.
+        self.mark = label(folder) + '.read-only'
+        self.boot = f'{self.mark}.{MAC_BOOT[:16]}'  # Marks stay short, well below Mach's 128-byte names.
+        self.sandboxes, self.wanted, self.stopping, self.contained = {self.mark: (None, self.boot, None)}, set(), False, False
 
     def enabled(self):
-        config = private_json(self.folder / 'config.json')
-        # An old job stream may outlive a failed stop during an account switch (#109).
-        if config.get('connectionFile') and (private_json(config['connectionFile']).get('account') or {}).get('id') != config['binding'][1]:
-            return None
+        try:
+            config = private_json(self.folder / 'config.json')
+            # An old job stream may outlive a failed stop during an account switch (#109).
+            if config.get('connectionFile') and (private_json(config['connectionFile']).get('account') or {}).get('id') != config['binding'][1]:
+                return None
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return None  # Anything unreadable counts as off.
         # Off or a lower level counts from the next job, before setup applies it (#109). Raising waits for setup.
         saved = saved_level(config)
         if saved and MAC_LEVELS.index(saved) < MAC_LEVELS.index(mac_level(config)):
@@ -1064,15 +1160,17 @@ class MacJobs:
                     'If the loop needs the Mac, the user can give it all secrets in its Secrets row. That applies from its next run.')
         return None
 
-    def refusal(self, core, job):
-        """Why this job may not run as asked, or None. Everything else that is not full access runs read-only."""
+    def closed(self, core):
+        """The access level, and why this sandbox may not use the Mac at all now (Off or a key list), or None."""
         level = mac_level(self.enabled() or {})
         self.track(level)
-        if level == 'off':
-            return 'Mac access is off.'
-        limited = self.limited(core)
-        if limited:
-            return limited
+        return level, 'Mac access is off.' if level == 'off' else self.limited(core)
+
+    def refusal(self, core, job):
+        """Why this job may not run as asked, or None. Everything else that is not full access runs read-only."""
+        level, closed = self.closed(core)
+        if closed:
+            return closed
         # After Off and the key list, so a sandbox without Mac access can't learn which Mac folders exist from a push.
         unusable = as_copy(job)
         if unusable:
@@ -1090,7 +1188,7 @@ class MacJobs:
 
     def serve(self):
         """One job stream per reachable core: the VM's, and each awake sandbox's while it stays awake."""
-        self.wanted, streams = set(), {}
+        streams = {}
         while True:
             with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
                 config = self.enabled()
@@ -1101,7 +1199,53 @@ class MacJobs:
                     if key not in streams or not streams[key].is_alive():
                         streams[key] = threading.Thread(target=self.follow, args=(core, config['device']), daemon=True)
                         streams[key].start()
+            with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
+                self.end_unwanted()  # Also when the list failed: it ends only what no listed stream keeps.
             time.sleep(5)
+
+    def end_unwanted(self):
+        """Ends each read-only command whose core's stream ended (Mac access Off, sign-out, or a sandbox no longer awake),
+        and what earlier runs or a failed end() left, until nothing carries its mark."""
+        with self.lock:
+            unwanted = [(mark, allowed, shell) for mark, (key, allowed, shell) in self.sandboxes.items() if key not in self.wanted]
+        for mark, allowed, shell in unwanted:
+            if shell:
+                shell.kill()  # Its sandbox may not be set up yet. Popen never signals a process it has already reaped.
+            if end(mark, allowed):
+                with self.lock:
+                    self.sandboxes.pop(mark, None)
+            else:
+                self.contained = False  # The next read-only command checks again first (containable).
+
+    def containable(self):
+        """Whether end() works on this Mac and spares other sandboxes, tried on two `sleep`s: marked() must find one whose
+        sandbox denies a test mark, and not one whose sandbox denies every name but one, as apps' sandboxes do. Checked once
+        per run, and again after a failure. Without it, read-only commands don't run."""
+        if not self.contained:
+            mark = self.boot + '.check'
+            rules = (f'(deny mach-lookup (global-name "{mark}"))', f'(deny mach-lookup)(allow mach-lookup (global-name "{mark}.open"))')
+            with contextlib.suppress(OSError):
+                ours, apps = tests = [subprocess.Popen(['/usr/bin/sandbox-exec', '-p', '(version 1)(allow default)' + rule, '/bin/sleep', '10'],
+                                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for rule in rules]
+                try:
+                    for _ in range(200):  # Until both sandboxes are set up.
+                        if ours.pid in marked(mark) and apps.pid in marked(mark, mark + '.open'):
+                            self.contained = apps.pid not in marked(mark)
+                            break
+                        time.sleep(.01)
+                finally:
+                    for test in tests:
+                        test.kill(); test.wait()
+        return self.contained
+
+    def close(self):
+        """The helper is stopping: no command starts any more, and none of its read-only commands outlives it."""
+        with self.lock:
+            self.stopping = True
+            shells = [shell for _, _, shell in self.sandboxes.values() if shell]
+        for shell in shells:
+            shell.kill()  # As in end_unwanted.
+        end(self.mark)
 
     def follow(self, core, device):
         delay = 2
@@ -1111,12 +1255,14 @@ class MacJobs:
                                                  headers={**core.headers, 'Accept': 'text/event-stream'})
                 with NET['opener'].open(request, timeout=60) as stream:
                     delay, event = 2, None
-                    for raw in stream:
+                    while raw := stream.readline(MAC_LINE + 1):
+                        if len(raw) > MAC_LINE:
+                            raise ValueError('Mac job is too large')
                         line = raw.decode().rstrip('\r\n')
                         if line.startswith('event:'):
                             event = line[6:].strip()
                         elif line.startswith('data:') and event == 'job':
-                            threading.Thread(target=self.execute, args=(core, device, json.loads(line[5:])), daemon=True).start()
+                            self.take(core, device, json.loads(line[5:]))
                         elif line.startswith('data:') and event == 'cancel':
                             self.cancel(json.loads(line[5:])['id'])
                         elif line.startswith(':') and (not self.enabled() or core.key not in self.wanted):
@@ -1130,6 +1276,21 @@ class MacJobs:
                         delay = 1
             with NUDGE:  # Check now wakes this wait.
                 NUDGE.wait(delay)
+
+    def take(self, core, device, job):
+        """Starts a job from the stream. Until it ends, a stop for it is kept (see cancel)."""
+        with self.lock:
+            self.taken[job['id']] = self.taken.get(job['id'], 0) + 1
+        def run():
+            try:
+                self.execute(core, device, job)
+            finally:
+                with self.lock:
+                    self.taken[job['id']] -= 1
+                    if not self.taken[job['id']]:
+                        del self.taken[job['id']]
+                        self.cancelled.discard(job['id'])
+        threading.Thread(target=run, daemon=True).start()
 
     def execute(self, core, device, job):
         def post(body, timeout=MAC_POST_SECONDS):
@@ -1150,15 +1311,21 @@ class MacJobs:
                 time.sleep(1)
         result = {'state': 'done', 'code': 127, 'stdout': '', 'stderr': '', 'truncated': False}
         # Core may have taken a confirmation whose reply was lost, so it still gets this result instead of waiting forever.
-        job['stdin'] = mac_stdin(core, device, job) if confirmed else ''
+        # Off and the key list come before the input, so a sandbox that may not use the Mac never makes it download any.
         refused = ('The Mac could not confirm this command with the cloud, so it did not run. Try again.' if not confirmed else
-                   "The Mac could not download this command's input from the cloud, so it did not run. Try again." if job['stdin'] is None else
-                   self.refusal(core, job))
+                   self.closed(core)[1])
+        if not refused:
+            job['stdin'] = mac_stdin(core, device, job)
+            refused = ("The Mac could not download this command's input from the cloud, so it did not run. Try again." if job['stdin'] is None else
+                       self.refusal(core, job))
         # Refused commands are checked too, but a script file is read only for a command that will run.
         with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
             review(core, job, mac_level(self.enabled() or {}), not refused)
         # A push into a temp folder (as_copy) runs read-only even once approved, since agents can swap paths there.
         sandboxed = not refused and (not job.get('write') or job.get('sandbox')) and mac_level(self.enabled() or {}) != 'full'
+        if sandboxed and not self.containable():
+            refused, sandboxed = "This Mac can't make sure a read-only command leaves nothing running, so it did not run.", False
+        mark = f'{self.boot}.{uuid.uuid4().hex[:16]}' if sandboxed else None  # Never the job's ID, which a sandbox can pick.
         login = pwd.getpwuid(os.getuid()).pw_shell or '/bin/zsh'
         # As in Local threads, Cloudroom's own tools (browser-harness) come first, then the PATH the app read from an
         # interactive login shell, so tools set up in ~/.zshrc are found, all after the user's profile sets PATH. On macOS
@@ -1182,9 +1349,16 @@ class MacJobs:
                 if job['id'] in self.cancelled:
                     self.cancelled.discard(job['id'])
                     raise PermissionError('The agent stopped this command before it started, so it did not run.')
-                process = subprocess.Popen([*read_only(data), *shell] if sandboxed else shell, cwd=folder,
+                if self.stopping:
+                    raise PermissionError('Cloudroom on the Mac is stopping, so this command did not run. Try again in a minute.')
+                # end_unwanted only ends what started before: Off or a sleeping sandbox counts from here on.
+                if sandboxed and core.key not in self.wanted:
+                    raise PermissionError('The Mac stopped taking commands from this sandbox, so this command did not run.')
+                process = subprocess.Popen([*read_only(data, self.mark, self.boot, mark), *shell] if sandboxed else shell, cwd=folder,
                                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
                 self.running[job['id']] = process
+                if sandboxed:
+                    self.sandboxes[mark] = (core.key, None, process)
         except OSError as error:
             result['code'] = 126 if isinstance(error, PermissionError) else 127
             result['stderr'] = str(error).encode().hex()
@@ -1202,10 +1376,15 @@ class MacJobs:
             for thread in [*readers, threading.Thread(target=feed, daemon=True)]:
                 thread.start()
             result['code'] = process.wait()
+            ended = sandboxed and end(mark)  # A read-only command leaves nothing running, so its output ends here too.
             for thread in readers:
                 thread.join(2)  # A background process may keep the pipe open.
             with self.lock:
                 self.running.pop(job['id'], None)
+                if ended:
+                    self.sandboxes.pop(mark, None)
+                elif sandboxed:
+                    self.sandboxes[mark], self.contained = (None, None, None), False  # end_unwanted keeps ending it.
             # Blocked local connections fail as EPERM, or as curl's "couldn't connect".
             if sandboxed and result['code'] and any(sign in output['stderr'].lower() for sign in (b'not permitted', b'eperm', b"couldn't connect")) and b'deadlock avoided' not in output['stderr'].lower():
                 output['stderr'] += (b"\nCloudroom: Mac access is Read-only, so commands cannot change the Mac, reach its local servers or sockets, or read Cloudroom's files.\n"
@@ -1237,7 +1416,7 @@ class MacJobs:
     def cancel(self, job):
         with self.lock:
             process = self.running.get(job)
-            if not process:
+            if not process and job in self.taken:
                 self.cancelled.add(job)
         if process:
             def kill(signal_number):
@@ -1290,8 +1469,9 @@ def run(folder):
     signal.signal(signal.SIGTERM, stop)
     with (folder / 'lock').open('a') as lock:
         claim(folder, lock)  # Before Mac jobs, so a second helper never takes any.
-        if not WINDOWS:  # Mac access is macOS and Linux only (macAccessSupported).
-            threading.Thread(target=MacJobs(folder).serve, daemon=True).start()
+        jobs = None if WINDOWS else MacJobs(folder)  # Mac access is macOS and Linux only (macAccessSupported).
+        if jobs:
+            threading.Thread(target=jobs.serve, daemon=True).start()
         try:
             while True:
                 try:
@@ -1413,6 +1593,8 @@ def run(folder):
         except KeyboardInterrupt:
             pass
         finally:
+            if jobs:  # First, so a failing tunnel can't skip it.
+                jobs.close()
             for tunnel in tunnels.values():
                 tunnel.close()
 

@@ -26,6 +26,7 @@ import {
   type NewThreadComposerSubmission,
 } from "@/components/promptbox/NewThreadComposer";
 import { ProviderCliVersionBanner } from "@/components/promptbox/banner/ProviderCliVersionBanner";
+import { DesktopUpdateCard } from "@/components/layout/DesktopUpdateBanner";
 import {
   buildProviderCliIssue,
   hasProviderCliAction,
@@ -62,6 +63,7 @@ import { Icon } from "@cloudroom/shared-ui/icon";
 import { PageShell } from "@/components/ui/page-shell.js";
 import { RouteLoadingSkeleton } from "@/components/ui/route-loading-skeleton";
 import { Button } from "@cloudroom/shared-ui/button";
+import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { usePointerCoarse } from "@cloudroom/shared-ui/hooks/use-pointer-coarse";
 import { COARSE_POINTER_COMPACT_ICON_SIZE_CLASS } from "@cloudroom/shared-ui/coarse-pointer-sizing";
@@ -501,6 +503,27 @@ export function LegacyProjectComposeRedirect({
   }, [location.state, navigate, projectId, setRootComposeProjectId]);
 
   return <RouteLoadingSkeleton isBoundedPane={false} />;
+}
+
+function ProjectsLoadError() {
+  const { refetch, isFetching } = useSidebarNavigation();
+  return (
+    <PageShell contentClassName="min-h-full items-center justify-center">
+      <div className="flex flex-col items-center gap-3 py-12">
+        <p className="text-center text-sm text-destructive">
+          Failed to load projects.
+        </p>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={isFetching}
+          onClick={() => void refetch()}
+        >
+          Retry
+        </Button>
+      </div>
+    </PageShell>
+  );
 }
 
 export function RootComposeView() {
@@ -1935,13 +1958,7 @@ function RootComposeSurface({
   ]);
 
   if (!projects && sidebarNavigationError) {
-    return (
-      <PageShell contentClassName="min-h-full items-center justify-center">
-        <p className="py-12 text-center text-sm text-destructive">
-          Failed to load projects.
-        </p>
-      </PageShell>
-    );
+    return <ProjectsLoadError />;
   }
 
   const machineSetupDialog = (
@@ -1958,7 +1975,7 @@ function RootComposeSurface({
     id: "root-compose-prompt",
     autoFocus: !isProviderCliVersionBlocked,
     allowSoftKeyboardAutoFocus: isCompactViewport,
-    banner: promptBanner,
+    banner: promptBanner ?? <DesktopUpdateCard attached={false} />,
     header: promptHeader,
     blockedReason: isProviderCliVersionBlocked
       ? `Update ${selectedProviderCliStatus?.displayName ?? selectedProviderId} before starting a thread.`

@@ -55,6 +55,7 @@ import {
 } from "@/hooks/useTheme";
 import { useHostDaemon, useLocalHostDaemonAccess } from "@/hooks/useHostDaemon";
 import { useAppThemePreview } from "@/hooks/useAppThemePreview";
+import { useBrandMark } from "@/hooks/useBrandMark";
 import { useCorners, type Corners } from "@/hooks/useCorners";
 import {
   ProviderTurnDisplaySection,
@@ -101,6 +102,7 @@ import { ArchivedThreadsSettingsSection } from "@/components/settings/ArchivedTh
 import { ImportChatsSettingsSection } from "@/components/settings/ImportChats";
 import { ExportChatsSettingsSection } from "@/components/settings/ExportChats";
 import { CliSkillsSettingsSection } from "@/components/settings/CliSkillsSettingsSection";
+import { CreditsUsageSection } from "@/components/settings/CreditsUsageSection";
 import { SkillUsageSection } from "@/components/settings/SkillUsageSection";
 import { MarketplacesSettingsSection } from "@/components/settings/MarketplacesSettingsSection";
 import {
@@ -442,6 +444,22 @@ function CornersSetting() {
           ))}
         </DropdownMenuContent>
       </DropdownMenu>
+    </SettingsWithControl>
+  );
+}
+
+function BrandMarkSetting() {
+  const [showBrandMark, setShowBrandMark] = useBrandMark();
+  return (
+    <SettingsWithControl
+      label="Show Cloudroom name"
+      description="The Cloudroom logo and name at the top of the window."
+    >
+      <Switch
+        checked={showBrandMark}
+        onCheckedChange={setShowBrandMark}
+        aria-label="Show Cloudroom name"
+      />
     </SettingsWithControl>
   );
 }
@@ -807,6 +825,7 @@ export function AppearanceSettingsSection({
           </DropdownMenu>
         </SettingsWithControl>
         <CornersSetting />
+        <BrandMarkSetting />
 
         <SettingsWithControl
           label="Palette"
@@ -1387,7 +1406,12 @@ export function SettingsView() {
   } else if (activeSection === "account") {
     content = <CloudroomAccountSettings />;
   } else if (activeSection === "analytics") {
-    content = <SkillUsageSection />;
+    content = (
+      <>
+        <CreditsUsageSection />
+        <SkillUsageSection />
+      </>
+    );
   } else if (activeSection === "machines") {
     content = <MachinesSettingsPage />;
   } else if (activeSection === "updates") {

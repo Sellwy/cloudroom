@@ -29,7 +29,7 @@ import { requirePrimaryHostId } from "../hosts/primary-host.js";
 import { withThreadContextClearGuard } from "./thread-context-mutation-guard.js";
 import {
   provisionUnmanagedEnvironmentForPath,
-  resolveReadyEnvironment,
+  reuseEnvironmentForPath,
 } from "./thread-environment-directory.js";
 import {
   appendThreadEvent,
@@ -38,6 +38,10 @@ import {
 import { setThreadReadyHook } from "./queued-message-dispatch.js";
 import { historySeed } from "./thread-harness-switch.js";
 import { stopThreadForCurrentState } from "./thread-lifecycle.js";
+import {
+  applyPendingThreadWorktreeMove,
+  watchFailedTurnsForWorktreeMoves,
+} from "./thread-worktree-move.js";
 
 export interface ThreadMoveResult {
   thread: Thread;
@@ -118,9 +122,11 @@ export async function moveThreadToProject(
 }
 
 export function installThreadMoves(deps: AppDeps): void {
-  setThreadReadyHook(deps.db, (threadId) =>
-    applyPendingThreadMove(deps, threadId),
-  );
+  setThreadReadyHook(deps.db, async (threadId) => {
+    await applyPendingThreadMove(deps, threadId);
+    await applyPendingThreadWorktreeMove(deps, threadId);
+  });
+  watchFailedTurnsForWorktreeMoves(deps);
   deps.hub.onThreadChanged((threadId, changes) => {
     if (!changes.includes("status-changed") || !pendingMoves.has(threadId))
       return;
@@ -240,7 +246,7 @@ async function moveLocalThread(
     source.path,
   );
   const target = existing
-    ? resolveReadyEnvironment(existing)
+    ? await reuseEnvironmentForPath(deps, existing)
     : await provisionUnmanagedEnvironmentForPath(deps, {
         hostId,
         path: source.path,

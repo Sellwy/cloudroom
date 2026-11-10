@@ -27,6 +27,7 @@ mod droid;
 mod files;
 mod fx;
 mod hermes;
+mod kimi;
 pub(crate) mod linux;
 mod openclaw;
 mod opencode;
@@ -54,6 +55,7 @@ pub enum Kind {
     Hermes,
     Devin,
     Droid,
+    Kimi,
     #[serde(rename = "openclaw")]
     OpenClaw,
 }
@@ -81,8 +83,9 @@ pub fn reasoning_levels<'a>(kind: Kind, models: &'a [Model], model: &str) -> Opt
     if let Some(entry) = models.iter().find(|entry| entry.model == model) {
         return Some(entry.reasoning_levels.iter().map(String::as_str).collect());
     }
+    // `none` runs any model without an effort override, so an omitted model without effort still starts (#1059).
     (kind == Kind::Claude).then(|| {
-        let mut levels = Vec::new();
+        let mut levels = vec!["none"];
         for level in models.iter().flat_map(|entry| &entry.reasoning_levels) {
             if !levels.contains(&level.as_str()) {
                 levels.push(level.as_str());
@@ -120,6 +123,7 @@ pub fn pi_reasoning_accepted(level: &str) -> bool {
 pub use devin::REASONING_LEVELS as DEVIN_REASONING_LEVELS;
 pub use droid::REASONING_LEVELS as DROID_REASONING_LEVELS;
 pub use hermes::REASONING_LEVELS as HERMES_REASONING_LEVELS;
+pub use kimi::REASONING_LEVELS as KIMI_REASONING_LEVELS;
 pub use openclaw::REASONING_LEVELS as OPENCLAW_REASONING_LEVELS;
 pub use opencode::REASONING_LEVELS as OPENCODE_REASONING_LEVELS;
 pub use opencode::import as import_opencode;
@@ -149,6 +153,42 @@ pub async fn claude_auth_ready(config: &Config) -> io::Result<bool> {
 
 pub async fn codex_models(config: &Config) -> (io::Result<Vec<Model>>, Option<Event>) {
     models(config, Kind::Codex).await
+}
+
+/// Codex app-servers that start together on a new CODEX_HOME race to create its SQLite state, and all but one exit
+/// with code 1 (#819): in a fresh sandbox, the login check and the model list did, failing ~1 in 3 first starts.
+/// So Core starts Codex once before it serves, only while the home has no state yet (~0.2 s).
+pub async fn warm_codex(config: &Config) {
+    let Some(profile) = config.harnesses.get(&Kind::Codex) else {
+        return;
+    };
+    let state = |entry: std::fs::DirEntry| {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        name.starts_with("state_") && name.ends_with(".sqlite")
+    };
+    if std::fs::read_dir(&profile.home).is_ok_and(|entries| entries.flatten().any(state)) {
+        return;
+    }
+    let (handle, mut events) = match Handle::spawn(config, Kind::Codex, None) {
+        Ok(spawned) => spawned,
+        Err(error) => return eprintln!("Codex warm-up could not start: {error}"),
+    };
+    let drain = tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if matches!(event, Event::Exited { .. }) {
+                break;
+            }
+        }
+    });
+    if let Err(error) = tokio::time::timeout(Duration::from_secs(5), codex::initialize(&handle))
+        .await
+        .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "timed out")))
+    {
+        eprintln!("Codex warm-up failed: {error}");
+    }
+    handle.request_shutdown();
+    let _ = drain.await;
 }
 
 /// Prove the harness can answer with this exact model before Teleport moves anything.
@@ -581,6 +621,12 @@ impl Handle {
                 None,
                 None,
             ),
+            Kind::Kimi => (
+                kimi::command(config, &profile)?,
+                Box::new(cursor::Protocol::new(&profile, resume.as_ref(), kimi::KIMI)),
+                None,
+                None,
+            ),
             Kind::OpenClaw => (
                 openclaw::command(config, &profile)?,
                 Box::new(cursor::Protocol::new(
@@ -695,6 +741,7 @@ impl Handle {
                 | Kind::Hermes
                 | Kind::Devin
                 | Kind::Droid
+                | Kind::Kimi
                 | Kind::OpenClaw
         ) {
             return cursor::capabilities(self.kind);
@@ -716,6 +763,7 @@ impl Handle {
             Kind::Hermes => hermes::start(&startup).await,
             Kind::Devin => devin::start(&startup).await,
             Kind::Droid => droid::start(&startup).await,
+            Kind::Kimi => kimi::start(&startup).await,
             Kind::OpenClaw => openclaw::start(&startup).await,
         }
     }
@@ -760,6 +808,7 @@ impl Handle {
             | Kind::Hermes
             | Kind::Devin
             | Kind::Droid
+            | Kind::Kimi
             | Kind::OpenClaw => cursor::send(self, request, input)
                 .await
                 .map(|()| Vec::new()),
@@ -783,6 +832,7 @@ impl Handle {
             | Kind::Hermes
             | Kind::Devin
             | Kind::Droid
+            | Kind::Kimi
             | Kind::OpenClaw => cursor::steer(self, request, text).await,
             Kind::Fx => fx::steer(self, request, text).await,
         }
@@ -798,6 +848,7 @@ impl Handle {
             | Kind::Hermes
             | Kind::Devin
             | Kind::Droid
+            | Kind::Kimi
             | Kind::OpenClaw => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "ACP compaction is not supported",
@@ -827,6 +878,7 @@ impl Handle {
             | Kind::Hermes
             | Kind::Devin
             | Kind::Droid
+            | Kind::Kimi
             | Kind::OpenClaw => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "ACP rewind is not supported",
@@ -915,6 +967,7 @@ impl Handle {
             | Kind::Hermes
             | Kind::Devin
             | Kind::Droid
+            | Kind::Kimi
             | Kind::OpenClaw => Ok(None),
         }
     }
@@ -936,6 +989,7 @@ impl Handle {
             | Kind::Hermes
             | Kind::Devin
             | Kind::Droid
+            | Kind::Kimi
             | Kind::OpenClaw => cursor::interrupt(self, state).await,
         }
     }
@@ -950,6 +1004,7 @@ impl Handle {
             | Kind::Hermes
             | Kind::Devin
             | Kind::Droid
+            | Kind::Kimi
             | Kind::OpenClaw => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "ACP context-only notices are unavailable",
@@ -995,6 +1050,7 @@ pub fn check_resume_history(
         Kind::Hermes => return hermes::validate(profile, saved, identity),
         Kind::Devin => return devin::validate(profile, saved, identity),
         Kind::Droid => return droid::validate(profile, saved, identity),
+        Kind::Kimi => return kimi::validate(profile, saved, identity),
         Kind::OpenClaw => return openclaw::validate(profile, saved, identity),
         _ => {}
     }
@@ -1038,6 +1094,7 @@ pub fn recover_records(
         }
         Kind::Devin => devin::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid))),
         Kind::Droid => droid::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid))),
+        Kind::Kimi => kimi::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid))),
         Kind::OpenClaw => {
             openclaw::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid)))
         }
@@ -1104,9 +1161,13 @@ pub fn checkpoint(
         Kind::Codex | Kind::Claude => files::checkpoint(previous, data, native),
         Kind::Pi => pi::checkpoint(data, native),
         Kind::Cursor => cursor::checkpoint(previous, data, native),
-        Kind::Fx | Kind::OpenCode | Kind::Hermes | Kind::Devin | Kind::Droid | Kind::OpenClaw => {
-            Err(io::Error::other("ACP stream has no native records"))
-        }
+        Kind::Fx
+        | Kind::OpenCode
+        | Kind::Hermes
+        | Kind::Devin
+        | Kind::Droid
+        | Kind::Kimi
+        | Kind::OpenClaw => Err(io::Error::other("ACP stream has no native records")),
     }
 }
 
